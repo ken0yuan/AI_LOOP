@@ -1,0 +1,11 @@
+# Shared AI_LOOP data: support knowledge and task-to-branch mappings.
+/data/*
+!/data/api-support.sqlite3
+!/data/api-classification/
+!/data/branch-mapping.json
+
+# Python caches.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
