@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import fetch_nightly_wheels as fetch
 from obs_downloader import ObsutilDownloader, ObsDownloadError
 import test_prepare_api_inputs as fixtures

@@ -150,4 +150,4 @@ git -C data/source_code/torch_npu -c core.editor=true merge --continue
 
 重试期间不要更换任务名单；需要更换时，先处理完当前未完成的Git操作。
 
-验证入口：`python3 -B -m unittest discover -s scripts -p 'test_prepare_development_branch.py' -v`。这些是实现验证，只使用临时本地Git仓库；上述暂缓的是实际开发分支的业务测试。
+验证入口：`python3 -B -m unittest discover -s tests -p 'test_prepare_development_branch.py' -v`。这些是实现验证，只使用临时本地Git仓库；上述暂缓的是实际开发分支的业务测试。

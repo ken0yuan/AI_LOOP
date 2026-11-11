@@ -5,6 +5,8 @@ import subprocess
 import sys
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import dispatch_adaptation_tasks as dispatcher
 import prepare_development_branch as step3
 import test_prepare_development_branch as branch_fixtures

@@ -1,4 +1,5 @@
-"""Offline end-to-end refresh tests using the original crawler and wheel checker."""
+"""Offline end-to-end refresh tests using the inventory extractor and wheel checker."""
+import base64
 import io
 import json
 import os
@@ -11,6 +12,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import venv
+import zlib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 import refresh_api_support_db as refresh
 
@@ -42,12 +46,10 @@ class RefreshTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.scripts = self.root / 'scripts'
         self.scripts.mkdir()
-        source = Path(__file__).resolve().parent
-        for name in ['refresh_api_support_db.py', 'scan_documented_apis.py']:
+        source = Path(refresh.__file__).resolve().parent
+        for name in ['refresh_api_support_db.py', 'api_refresh_runtime.py', 'api_first_seen.py',
+                     'scan_documented_apis.py', 'extract_docs_inventory.py']:
             shutil.copyfile(source / name, self.scripts / name)
-        (self.scripts / 'pytorch_api_diff').mkdir()
-        for name in ['extract_docs_crawl.py']:
-            shutil.copyfile(source / 'pytorch_api_diff' / name, self.scripts / 'pytorch_api_diff' / name)
         self.venv = self.root / 'data/venv/fixture'
         venv.EnvBuilder(with_pip=False).create(self.venv)
         result = subprocess.run([str(self.venv / 'bin/python'), '-I', '-B', '-c',
@@ -55,6 +57,11 @@ class RefreshTests(unittest.TestCase):
                                 capture_output=True, text=True, check=True)
         self.torch = Path(result.stdout.strip()) / 'torch'
         self.torch.mkdir()
+        distribution = self.torch.parent / 'torch-2.16.0a0.dist-info'
+        distribution.mkdir()
+        (distribution / 'METADATA').write_text(
+            'Metadata-Version: 2.1\nName: torch\nVersion: 2.16.0a0\n')
+        (distribution / 'RECORD').write_text('')
         (self.torch / '__init__.py').write_text(TORCH)
         self.task = self.root / 'data/run_data/adapt-torch.new_api-261109'
         self.task.mkdir(parents=True)
@@ -98,8 +105,22 @@ class RefreshTests(unittest.TestCase):
         return refresh.refresh(self.basic, self.database, root=self.root,
                                extractor=extract, checker=kwargs.pop('checker', self.checker), **kwargs)
 
-    def assert_clean(self):
-        self.assertTrue(all(not path.exists() for path in self.working_directories))
+    def assert_clean(self, *, completed=True, checkpoint=True):
+        work_paths = set(self.working_directories) | {self.task / 'log/api-refresh'}
+        for work in work_paths:
+            self.assertTrue(work.is_dir())
+            self.assertTrue((work / '.refresh.lock').is_file())
+            saved = work / 'checkpoint.json'
+            if checkpoint:
+                self.assertTrue(saved.is_file())
+                state = json.loads(saved.read_text())
+                self.assertEqual(state['completed'], completed)
+                self.assertTrue(state['documented_apis'])
+            else:
+                self.assertFalse(saved.exists())
+            if completed:
+                self.assertFalse((work / 'docs-api.json').exists())
+                self.assertFalse((work / 'docs-cache').exists())
         self.assertEqual(list(self.root.rglob('*.bak*')), [])
         self.assertEqual(list(self.root.rglob('*initial.sqlite3')), [])
         if self.output.parent.exists():
@@ -219,7 +240,7 @@ class RefreshTests(unittest.TestCase):
             self.run_refresh({'torch.optional.NewClass'})
         self.assertEqual(self.database.read_bytes(), before)
         self.assertFalse(self.output.exists())
-        self.assert_clean()
+        self.assert_clean(completed=False)
 
     def test_venv_is_required_instead_of_guessing_from_python_version(self):
         self.basic.write_text(json.dumps({'python_version': '3.11.17'}))
@@ -240,17 +261,22 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.rows()['torch.stay']['适配策略'], 'concurrent-user-change')
         self.assertNotIn('torch.new_api', self.rows())
         self.assertFalse(self.output.exists())
-        self.assert_clean()
+        self.assert_clean(completed=False)
 
     def test_output_failure_rolls_back_database(self):
         self.insert('torch.docgone')
         before = self.rows()
-        with patch.object(refresh.os, 'replace', side_effect=OSError('fixture output unavailable')):
+        replace = refresh.os.replace
+        def fail_handoff_only(source, destination):
+            if Path(destination).resolve() == self.output.resolve():
+                raise OSError('fixture output unavailable')
+            return replace(source, destination)
+        with patch.object(refresh.os, 'replace', side_effect=fail_handoff_only):
             with self.assertRaisesRegex(OSError, 'output unavailable'):
                 self.run_refresh({'torch.new_api'})
         self.assertEqual(self.rows(), before)
         self.assertFalse(self.output.exists())
-        self.assert_clean()
+        self.assert_clean(completed=False)
 
     def test_commit_failure_rolls_back_and_restores_existing_handoff(self):
         self.insert('torch.stay')
@@ -270,16 +296,16 @@ class RefreshTests(unittest.TestCase):
                 self.run_refresh({'torch.stay', 'torch.new_api'})
         self.assertEqual(self.rows(), before)
         self.assertEqual(self.output.read_bytes(), old_output)
-        self.assert_clean()
+        self.assert_clean(completed=False)
 
     def cli(self, pages):
         fixtures = self.root / 'pages.json'
         fixtures.write_text(json.dumps(pages))
         temporary_root = self.root / 'temporary'
         temporary_root.mkdir(exist_ok=True)
-        # Exercise the unchanged crawler over deterministic HTTP responses, then
+        # Exercise the inventory extractor over deterministic HTTP responses, then
         # the real scanner subprocess in the Step 0 venv and real SQLite writes.
-        bootstrap = '''import io,json,sys,urllib.request,urllib.error
+        bootstrap = '''import base64,io,json,sys,urllib.request,urllib.error
 from pathlib import Path
 root=Path(sys.argv[1]);pages=json.loads((root/'pages.json').read_text())
 def urlopen(request,timeout=None):
@@ -287,7 +313,8 @@ def urlopen(request,timeout=None):
  value=pages.get(url)
  if value is None:raise urllib.error.HTTPError(url,404,'fixture missing',{},None)
  if isinstance(value,int):raise urllib.error.HTTPError(url,value,'fixture HTTP failure',{},None)
- return io.BytesIO(value.encode())
+ data=base64.b64decode(value['base64']) if isinstance(value,dict) else value.encode()
+ return io.BytesIO(data)
 urllib.request.urlopen=urlopen
 sys.path.insert(0,str(root/'scripts'))
 import refresh_api_support_db
@@ -302,14 +329,13 @@ raise SystemExit(refresh_api_support_db.main())
 
     def pages(self):
         root = refresh.MAIN
-        toc = ''.join('<li class="toctree-l2"><a class="reference internal" '
-                      f'href="generated/{name}.html">{name}</a></li>'
-                      for name in ['torch.stay', 'torch.new_api'])
-        def page(name):
-            return f'<dl class="py function"><dt class="sig sig-object py" id="{name}">{name}()</dt></dl>'
-        return {root + '/pytorch-api.html':toc,
-                root + '/generated/torch.stay.html':page('torch.stay'),
-                root + '/generated/torch.new_api.html':page('torch.new_api')}
+        names = ['torch.stay', 'torch.new_api']
+        header = ('# Sphinx inventory version 2\n# Project: PyTorch\n'
+                  '# Version: main (2.16.0a0+gitfixture)\n# The remainder is compressed using zlib.\n')
+        entries = '\n'.join(f'{name} py:function 1 generated/{name}.html#$ -'
+                            for name in names) + '\n'
+        inventory = header.encode() + zlib.compress(entries.encode())
+        return {root + '/objects.inv': {'base64': base64.b64encode(inventory).decode('ascii')}}
 
     def test_single_entry_cli_reuses_real_extractor_checker_and_updates_sqlite(self):
         self.insert('torch.stay')
@@ -329,14 +355,15 @@ raise SystemExit(refresh_api_support_db.main())
     def test_extractor_failure_leaves_database_unchanged(self):
         self.insert('torch.docgone')
         pages = self.pages()
-        pages[refresh.MAIN + '/pytorch-api.html'] = 503
+        pages[refresh.MAIN + '/objects.inv'] = 503
         before = self.database.read_bytes()
         result = self.cli(pages)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('REFRESH_FAILED', result.stderr)
+        self.assertIn('503', result.stderr)
         self.assertEqual(self.database.read_bytes(), before)
         self.assertFalse(self.output.exists())
-        self.assert_clean()
+        self.assert_clean(completed=False, checkpoint=False)
 
     def test_document_names_and_count_are_preserved_without_normalization(self):
         data = {'torch.__init__': ['kept'], 'torch.Tensor': ['add'],

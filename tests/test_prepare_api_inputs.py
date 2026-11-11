@@ -12,6 +12,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import prepare_api_inputs as prepare
 import fetch_latest_sources as sources
 import fetch_nightly_wheels as wheel_fetch

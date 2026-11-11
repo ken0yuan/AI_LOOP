@@ -5,6 +5,10 @@ import io
 import json
 import unittest
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import prepare_api_inputs as prepare
 import test_prepare_api_inputs as fixtures
 

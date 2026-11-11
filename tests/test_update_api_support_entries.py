@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import update_api_support_entries as update
 import refresh_api_support_db as refresh
 
@@ -316,7 +318,7 @@ class CompleteEntriesTests(unittest.TestCase):
         scripts = self.root/'scripts'
         scripts.mkdir()
         source = Path(update.__file__).resolve().parent
-        for name in ['update_api_support_entries.py','refresh_api_support_db.py']:
+        for name in ['update_api_support_entries.py','refresh_api_support_db.py','api_refresh_runtime.py','api_first_seen.py']:
             (scripts/name).write_bytes((source/name).read_bytes())
         cmd=[sys.executable,'-B',str(scripts/'update_api_support_entries.py'),
              '--basic-information',str(self.basic),'--database',str(self.database),

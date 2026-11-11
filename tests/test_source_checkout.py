@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import fetch_latest_sources as fetch
 import fetch_latest_sources as source
 

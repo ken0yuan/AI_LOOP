@@ -9,6 +9,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import fetch_nightly_wheels as fetch
 import install_env as installer
 import obs_downloader

@@ -7,6 +7,8 @@ import sys
 import tarfile
 import unittest
 from unittest.mock import patch
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import fetch_latest_sources as sources
 import fetch_nightly_wheels as fetch
 import install_env as installer

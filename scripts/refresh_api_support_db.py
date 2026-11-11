@@ -13,6 +13,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from api_refresh_runtime import RefreshRecovery, WheelDependencyError
+from api_first_seen import COLUMN as FIRST_SEEN_COLUMN, capture_document_version, read_document_version, stamp_new_apis
 
 ROOT = Path(__file__).resolve().parents[1]
 NORMAL_STATES = {'支持', '不支持', '未提供'}
@@ -59,17 +61,17 @@ def names_from_document(data):
 
 
 def collect_main_apis(scripts, work, *, crawler=None):
-    """Run the original crawler unchanged; its output defines the API names/count."""
-    tools = scripts / 'pytorch_api_diff'
-    crawler = crawler or load_module(tools / 'extract_docs_crawl.py', '_refresh_docs_crawler')
+    """Run the inventory-based extractor; preserve its module/name output format."""
+    crawler_path = scripts / 'extract_docs_inventory.py'
+    crawler = crawler or load_module(crawler_path, '_refresh_docs_crawler')
     if crawler.BASE_URL.format(version='main') != MAIN:
         raise ValueError('The documentation extractor must target official main documentation')
     output = work / 'docs-api.json'
     original_argv = sys.argv
     try:
-        sys.argv = [str(tools / 'extract_docs_crawl.py'), 'main', str(output),
+        sys.argv = [str(crawler_path), 'main', str(output),
                     '--cache-dir', str(work / 'docs-cache')]
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), capture_document_version(crawler, work):
             crawler.main()
     finally:
         sys.argv = original_argv
@@ -155,6 +157,8 @@ def check_in_wheel(python, scanner, names, work, *, timeout=1800):
             checked[row['name']] = True
         elif row['status'] == 'unresolved' and row.get('error_type') == 'AttributeError':
             checked[row['name']] = False
+        elif row['status'] == 'missing_dependency':
+            raise WheelDependencyError(report, EXISTS)
         else:
             raise RuntimeError(f'Wheel lookup failed for {row["name"]}: '
                                f'{row["status"]}: {row.get("message", "")}')
@@ -175,7 +179,7 @@ def stage_output(path, content):
         raise
 
 
-def publish(database, initial_state, additions, changes, output):
+def publish(database, initial_state, additions, changes, output, *, first_version=None):
     """Write only names/statuses, preserving the rest of each stored row."""
     output.parent.mkdir(parents=True, exist_ok=True)
     old_output = output.read_bytes() if output.exists() else None
@@ -202,6 +206,7 @@ def publish(database, initial_state, additions, changes, output):
         for name in sorted(additions):
             conn.execute('INSERT INTO "API支持数据" ("API名称","API适配分类","是否对外","分类待审核") '
                          'VALUES (?, ?, ?, ?)', (name, '框架类API', '是', '是'))
+        stamp_new_apis(conn, additions, first_version)
         for name, status in sorted(changes.items()):
             conn.execute('UPDATE "API支持数据" SET "是否支持"=? WHERE "API名称"=?', (status, name))
         os.replace(temporary, output)
@@ -247,23 +252,24 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
     if not output.resolve().is_relative_to(basic_information.parent.resolve()):
         raise ValueError('new-apis output must be inside this task directory')
     scripts = root / 'scripts'
-    with tempfile.TemporaryDirectory(prefix='api-support-refresh-') as directory:
-        work = Path(directory)
-        doc_names = (extractor(work) if extractor else collect_main_apis(scripts, work))
+    with RefreshRecovery(basic_information, scripts, python, root, timeout, MAIN) as recovery:
+        work = recovery.work
+        doc_names = recovery.documents(lambda: extractor(work) if extractor else collect_main_apis(scripts, work))
         if not isinstance(doc_names, set) or not doc_names:
             raise ValueError('Expected a non-empty extracted API name set')
         state = database_snapshot(database)
         additions, removals = candidates(doc_names, state)
         required = additions | {canonical(name) for name in removals}
         results = (checker(python, scripts / 'scan_documented_apis.py', required, work)
-                   if checker else check_in_wheel(python, scripts / 'scan_documented_apis.py',
-                                                 required, work, timeout=timeout))
+                   if checker else recovery.check(check_in_wheel, required))
         if set(results) != required or any(type(value) is not bool for value in results.values()):
             raise ValueError('Incomplete wheel existence results')
         inserted = {name for name in additions if results[name]}
         changes = {name: '文档删除，待下线' if results[canonical(name)] else 'API删除，待下线'
                    for name in removals}
-        handoff = publish(database, state, inserted, changes, output)
+        first_version = read_document_version(work) if inserted and FIRST_SEEN_COLUMN in state[0] else None
+        handoff = publish(database, state, inserted, changes, output, first_version=first_version)
+        recovery.complete(results)
     return {'status': 'DATABASE_REFRESHED', 'documented': len(doc_names), 'added': len(inserted),
             'api_deleted': sum(value == 'API删除，待下线' for value in changes.values()),
             'documentation_deleted': sum(value == '文档删除，待下线' for value in changes.values()),

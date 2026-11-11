@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+
 import prepare_adapt_information as prepare
 
 
@@ -144,7 +146,7 @@ class AdaptInformationTests(unittest.TestCase):
         scripts = self.root/'scripts'
         scripts.mkdir()
         source = Path(prepare.__file__).resolve().parent
-        for name in ['prepare_adapt_information.py','refresh_api_support_db.py']:
+        for name in ['prepare_adapt_information.py','refresh_api_support_db.py','api_refresh_runtime.py','api_first_seen.py']:
             (scripts/name).write_bytes((source/name).read_bytes())
         self.description('API `Tensor.add` needs adaptation')
         result = subprocess.run([sys.executable,'-B',str(scripts/'prepare_adapt_information.py'),

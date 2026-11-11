@@ -217,13 +217,14 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
     conn.row_factory = sqlite3.Row
     try:
         conn.execute('BEGIN IMMEDIATE')
-        require(set(r[1] for r in conn.execute('PRAGMA table_info("API支持数据")')) == set(COLUMNS),
-                'Expected the eleven-column API支持数据 schema')
+        columns = {r[1] for r in conn.execute('PRAGMA table_info("API支持数据")')}
+        require(set(COLUMNS) <= columns <= set(COLUMNS) | {'api首次出现版本'},
+                'Expected eleven business columns and optional api首次出现版本')
         for name in names:
             row = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?', (name,)).fetchone()
             require(row is not None, f'{name}: not registered by refresh')
             require(name in reasons, f'{name}: shared three-level reasons required')
-            original = dict(row)
+            original = {column: row[column] for column in COLUMNS}
             fields = by_name.get(name, original)
             validate_fields(fields, original)
             validate_new_labels(fields, reasons[name], proposals, root)
@@ -232,7 +233,7 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
                 conn.execute('UPDATE "API支持数据" SET ' + assignments + ' WHERE "API名称"=?',
                              [fields[c] for c in COLUMNS[1:]] + [name])
                 check = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?', (name,)).fetchone()
-                require(dict(check) == fields, f'{name}: database readback mismatch')
+                require({column: check[column] for column in COLUMNS} == fields, f'{name}: database readback mismatch')
         conn.commit()
     except BaseException:
         conn.rollback()

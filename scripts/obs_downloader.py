@@ -7,6 +7,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from obs_query_retry import query
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,13 +63,14 @@ class ObsutilDownloader:
             raise ObsDownloadError(f"obsutil 调用超时({timeout}s): {args}") from e
 
     def stat(self, url: str) -> dict | None:
-        """查询对象元数据；不存在（或查询失败）返回 None。
+        """查询对象元数据；明确不存在返回 None，其他查询失败抛错。
 
         返回 {last_modified, etag, size}——ETag 作为远端对象版本标识
         （同名覆盖上传会变化，满足“对象更新必须重新核实”），
         LastModified 作为远端时间（不用本地发现时间冒充）。
         """
-        proc = self._run(["stat", url], timeout=STAT_LS_TIMEOUT)
+        proc = query(self._run, ["stat", url], timeout=STAT_LS_TIMEOUT,
+                     error_type=ObsDownloadError, allow_missing=True)
         if proc.returncode != 0:
             return None
         out = proc.stdout or ""
@@ -95,7 +97,8 @@ class ObsutilDownloader:
         用于 cycle 的一次性桶快照（避免对每个 commit 逐个 stat）。
         解析 `obsutil ls` 的“对象名行 + 元数据行”两行式表格输出。
         """
-        proc = self._run(["ls", prefix_url, "-limit=10000"], timeout=STAT_LS_TIMEOUT)
+        proc = query(self._run, ["ls", prefix_url, "-limit=10000"], timeout=STAT_LS_TIMEOUT,
+                     error_type=ObsDownloadError)
         if proc.returncode != 0:
             raise ObsDownloadError(
                 f"obsutil ls 失败 (exit={proc.returncode}): {prefix_url}\n"
