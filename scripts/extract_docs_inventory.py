@@ -67,7 +67,7 @@ def inventory_targets(data, base_url):
         if uri.endswith('$'):
             uri = uri[:-1] + original
         page, anchor = urldefrag(urljoin(base_url + '/', uri))
-        name = normalize_name(unquote(anchor))
+        name = normalize_name(original)
         if not name.startswith('torch.') or not page.startswith(base_url + '/'):
             raise ValueError('API entry has no local declaration target: ' + original)
         if name in targets and targets[name] != page:

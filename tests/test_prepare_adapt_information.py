@@ -37,6 +37,10 @@ class AdaptInformationTests(unittest.TestCase):
             conn.executemany('INSERT INTO "API支持数据" VALUES (?,?)',
                              [('Tensor.add','是'), ('torch.Tensor','是'), ('torch.nn.functional.relu','是'),
                               ('torch.already_done','否'), ('view','是')])
+        with self.connection() as conn:
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "是否对外" TEXT DEFAULT "是"')
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "是否支持" TEXT DEFAULT "支持"')
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "API真正名字" TEXT')
         self.output = self.task / 'adapt-information.json'
 
     def description(self, text):
@@ -94,13 +98,68 @@ class AdaptInformationTests(unittest.TestCase):
         self.assertNotIn('output',result)
         self.assertFalse(self.output.exists())
 
-    def test_all_no_does_not_touch_existing_output_or_report_ready(self):
+    def test_all_no_clears_old_tasks_and_preserves_other_material(self):
         self.description('API `torch.already_done` needs adaptation')
         self.output.write_text('{"task-branches":{"old":"adapt-old"},"base-commit":"keep"}',encoding='utf-8')
         before = self.output.read_bytes()
         result = self.run_prepare()
         self.assertEqual(result['status'],'NO_ADAPTATION_REQUIRED')
-        self.assertEqual(self.output.read_bytes(),before)
+        self.assertEqual(json.loads(self.output.read_text(encoding='utf-8')), {'task-branches':[], 'base-commit':'keep'})
+
+    def test_alias_uses_representative_local_flag_and_is_deduplicated(self):
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "API真正名字"=?, "本地是否适配"=? WHERE "API名称"=?',
+                         ('Tensor.add', '否', 'view'))
+        self.description('API `view` and API `Tensor.add` need adaptation')
+        result = self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_text())['task-branches'], ['adapt-Tensor.add'])
+        self.assertEqual(result['resolved_apis']['view'], 'Tensor.add')
+
+    def test_offline_and_internal_original_names_are_not_rescued_by_alias(self):
+        for column, value in [('是否支持', 'API删除，待下线'), ('是否对外', '否')]:
+            with self.subTest(column=column):
+                with self.connection() as conn:
+                    conn.execute('UPDATE "API支持数据" SET "是否对外"=?,"是否支持"=?,"API真正名字"=? '
+                                 'WHERE "API名称"=?', ('是','支持','Tensor.add','view'))
+                    conn.execute('UPDATE "API支持数据" SET "'+column+'"=? WHERE "API名称"=?', (value,'view'))
+                self.description('API `view` needs adaptation')
+                self.assertEqual(self.run_prepare()['status'], 'NO_ADAPTATION_REQUIRED')
+                self.assertFalse(self.output.exists())
+
+    def test_offline_representative_is_filtered_but_document_removal_is_allowed(self):
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "API真正名字"=? WHERE "API名称"=?', ('Tensor.add','view'))
+            conn.execute('UPDATE "API支持数据" SET "是否支持"=? WHERE "API名称"=?', ('API删除，待下线','Tensor.add'))
+        self.description('API `view` needs adaptation')
+        self.assertEqual(self.run_prepare()['status'], 'NO_ADAPTATION_REQUIRED')
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "是否支持"=? WHERE "API名称"=?', ('文档删除，待下线','Tensor.add'))
+        self.assertEqual(self.run_prepare()['status'], 'ADAPT_INFORMATION_READY')
+
+    def test_empty_filtered_selection_clears_plan_and_retains_git_recovery(self):
+        self.description('API `Tensor.add` needs adaptation')
+        checkpoint = {'status':'MERGE_CONFLICT', 'requested-branches':['adapt-Tensor.add']}
+        self.output.write_text(json.dumps({'task-branches':['adapt-Tensor.add'], 'git-control':checkpoint,
+                                          'development-branch':'keep', 'adapt-plan':{'old':{}}, 'dispatcher':{}}))
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "是否支持"=? WHERE "API名称"=?', ('API删除，待下线','Tensor.add'))
+        self.assertEqual(self.run_prepare()['status'], 'NO_ADAPTATION_REQUIRED')
+        saved = json.loads(self.output.read_text())
+        self.assertEqual(saved['task-branches'], [])
+        self.assertEqual(saved['git-control'], checkpoint)
+        self.assertNotIn('adapt-plan', saved)
+        self.assertNotIn('dispatcher', saved)
+
+    def test_mixed_selection_drops_offline_tasks_during_pending_recovery(self):
+        self.description('API `Tensor.add` and API `view` need adaptation')
+        checkpoint = {'status':'MERGE_CONFLICT'}
+        self.output.write_text(json.dumps({'task-branches':['adapt-Tensor.add','adapt-view'], 'git-control':checkpoint}))
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "是否支持"=? WHERE "API名称"=?', ('API删除，待下线','view'))
+        self.run_prepare()
+        saved = json.loads(self.output.read_text())
+        self.assertEqual(saved['task-branches'], ['adapt-Tensor.add'])
+        self.assertEqual(saved['git-control'], checkpoint)
 
     def test_missing_description_or_no_explicit_api_does_not_create_output(self):
         for description in [None, '', 'Please view the problem details.']:

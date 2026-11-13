@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Complete API database rows from eleven-column JSONL and shared short reasons."""
+"""Fill missing API fields from eleven-column JSONL and current-run reasons."""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +9,10 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from refresh_api_support_db import ROOT, read_json, resolve, stage_output
+from refresh_api_support_db import ROOT, BUSINESS_COLUMNS, has_value as text, read_json, resolve, stage_output
 
-COLUMNS = ('API名称', '是否支持', 'API等级', 'API适配分类', '是否对外',
-           '分类', '细分模块', '细分场景', '适配策略', '本地是否适配', '分类待审核')
-DEFAULTS = {'是否支持': '未提供', 'API等级': 'L2', 'API适配分类': '框架类API',
+COLUMNS = BUSINESS_COLUMNS
+DEFAULTS = {'是否支持': '未提供', 'API等级': 'L2',
             '是否对外': '是', '适配策略': '补充testcase', '本地是否适配': '是', '分类待审核': '是'}
 CLASSIFICATION = ('分类', '细分模块', '细分场景')
 STAGES = ('category', 'module', 'scenario')
@@ -25,10 +24,6 @@ PLACEHOLDERS = {'未知', '待分类', '待确定', '待补充', '待审核', 'n
 def require(condition, message):
     if not condition:
         raise ValueError(message)
-
-
-def text(value):
-    return isinstance(value, str) and bool(value.strip())
 
 
 def jsonl(path):
@@ -85,18 +80,19 @@ def shared_reasons(path):
     return classification_evidence(path)[0]
 
 
-def save_reasons(records, *, root=ROOT):
+def save_reasons(records, *, basic_information, root=ROOT):
     """Upsert the AI's short reasons without creating a separate input file."""
-    save_evidence(records, [], root=root)
+    save_evidence(records, [], basic_information=basic_information, root=root)
 
 
-def save_definitions(records, *, root=ROOT):
+def save_definitions(records, *, basic_information, root=ROOT):
     """Store candidate definitions in classification-evidence.jsonl, never references."""
     require(isinstance(records, list), 'Definition updates must be an array')
-    save_evidence([], [dict(record, kind='definition') for record in records], root=root)
+    save_evidence([], [dict(record, kind='definition') for record in records],
+                  basic_information=basic_information, root=root)
 
 
-def save_evidence(records, definitions, *, root=ROOT):
+def save_evidence(records, definitions, *, basic_information, root=ROOT):
     root = Path(root).resolve()
     require(isinstance(records, list), 'Reason updates must be an array')
     if not records and not definitions:
@@ -106,7 +102,7 @@ def save_evidence(records, definitions, *, root=ROOT):
     temporary = None
     try:
         conn.execute('BEGIN IMMEDIATE')
-        path = root / 'data/api-classification/classification-evidence.jsonl'
+        path = resolve(basic_information, root).parent / 'api-classification/classification-evidence.jsonl'
         existing, existing_definitions = classification_evidence(path)
         # Reuse the reader's validation before publishing any update.
         names = []
@@ -132,18 +128,34 @@ def save_evidence(records, definitions, *, root=ROOT):
             temporary.unlink(missing_ok=True)
 
 
+def initial_adaptation_type(fields):
+    return ('算子类API' if fields['分类'] == '基础计算' and fields['细分模块'] == '基础计算'
+            else '框架类API')
+
+
 def validate_fields(fields, original):
     name = original['API名称']
     require(isinstance(fields, dict) and set(fields) == set(COLUMNS),
             f'{name}: entry must contain exactly the eleven database columns')
     require(all(text(v) for v in fields.values()), f'{name}: empty database field')
     require(fields['API名称'] == name, f'{name}: primary key cannot change')
+    classification_added = any(not text(original[c]) for c in (*CLASSIFICATION, 'API适配分类'))
+    for column in COLUMNS[1:]:
+        if column == '分类待审核' and classification_added:
+            require(fields[column] == '是', f'{name}: completed classification needs review')
+        elif text(original[column]):
+            require(fields[column] == original[column], f'{name}: preserve {column}')
     for column, default in DEFAULTS.items():
+        if column == '分类待审核' and classification_added:
+            continue
         old = original[column]
         expected = old if text(old) else default
         require(fields[column] == expected, f'{name}: preserve {column}; missing default is {default}')
     require(fields['是否对外'] == '是', f'{name}: only public APIs belong to this step')
     require(fields['API适配分类'] in TYPES, f'{name}: invalid API适配分类')
+    if not text(original['API适配分类']):
+        expected = initial_adaptation_type(fields)
+        require(fields['API适配分类'] == expected, f'{name}: API适配分类 must follow 分类 and 细分模块')
     for column in CLASSIFICATION:
         require(fields[column].strip().lower() not in PLACEHOLDERS, f'{name}: placeholder in {column}')
     for column in ('本地是否适配', '分类待审核'):
@@ -207,7 +219,7 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
     by_name = {r['API名称']: r for r in records}
     require(len(by_name) == len(records) and set(by_name) <= set(names),
             'Entries must use unique exact names from new-apis.json')
-    evidence_path = root / 'data/api-classification/classification-evidence.jsonl'
+    evidence_path = task / 'api-classification/classification-evidence.jsonl'
     reasons, definitions = classification_evidence(evidence_path)
     proposals = list(definitions.values())
     database = resolve(database or 'data/api-support.sqlite3', root)
@@ -218,22 +230,38 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
     try:
         conn.execute('BEGIN IMMEDIATE')
         columns = {r[1] for r in conn.execute('PRAGMA table_info("API支持数据")')}
-        require(set(COLUMNS) <= columns <= set(COLUMNS) | {'api首次出现版本'},
-                'Expected eleven business columns and optional api首次出现版本')
+        require(set(COLUMNS) <= columns <= set(COLUMNS) | {'api首次出现版本', 'API真正名字'},
+                'Expected eleven business columns and optional version/representative columns')
+        updated = 0
         for name in names:
             row = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?', (name,)).fetchone()
             require(row is not None, f'{name}: not registered by refresh')
-            require(name in reasons, f'{name}: shared three-level reasons required')
+            require(row['是否对外'] == '是' and row['是否支持'] != 'API删除，待下线',
+                    f'{name}: only available public APIs can be completed')
+            require('API真正名字' not in columns or not row['API真正名字'],
+                    f'{name}: complete the representative instead of an alias')
             original = {column: row[column] for column in COLUMNS}
-            fields = by_name.get(name, original)
+            fields = dict(by_name.get(name, original))
+            for column, default in DEFAULTS.items():
+                if not text(fields[column]):
+                    fields[column] = default
+            if not text(original['API适配分类']):
+                fields['API适配分类'] = initial_adaptation_type(fields)
+            classification_added = any(not text(original[c]) for c in (*CLASSIFICATION, 'API适配分类'))
+            if classification_added and (name not in by_name or not text(fields['分类待审核'])):
+                fields['分类待审核'] = '是'
             validate_fields(fields, original)
-            validate_new_labels(fields, reasons[name], proposals, root)
-            if name in by_name:
-                assignments = ','.join('"' + c + '"=?' for c in COLUMNS[1:])
+            if any(not text(original[c]) for c in CLASSIFICATION):
+                require(name in reasons, f'{name}: shared three-level reasons required')
+                validate_new_labels(fields, reasons[name], proposals, root)
+            changed = [c for c in COLUMNS[1:] if fields[c] != original[c]]
+            if changed:
+                assignments = ','.join('"' + c + '"=?' for c in changed)
                 conn.execute('UPDATE "API支持数据" SET ' + assignments + ' WHERE "API名称"=?',
-                             [fields[c] for c in COLUMNS[1:]] + [name])
+                             [fields[c] for c in changed] + [name])
                 check = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?', (name,)).fetchone()
                 require({column: check[column] for column in COLUMNS} == fields, f'{name}: database readback mismatch')
+                updated += 1
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -241,8 +269,8 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
     finally:
         conn.close()
     entries_path.unlink(missing_ok=True)
-    return {'status': 'API_ENTRIES_READY', 'completed': len(names), 'updated': len(records),
-            'reused': len(names) - len(records), 'database': str(database), 'classification': str(evidence_path)}
+    return {'status': 'API_ENTRIES_READY', 'completed': len(names), 'updated': updated,
+            'reused': len(names) - updated, 'database': str(database), 'classification': str(evidence_path)}
 
 
 def main():

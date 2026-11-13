@@ -20,17 +20,9 @@ The revised policy requires **all three classification fields to be populated**.
 
 AI can propose a new scenario when the existing module fits but its scenarios cannot express the responsibility. It can propose a new submodule when the category fits but its module definitions are insufficient. A new top-level category requires evidence that all five existing categories are unsuitable. Each proposal includes its parent, name, definition, inclusion criteria, exclusion boundaries, examples, and the reason existing definitions are insufficient. A single API can justify a reusable label for a rare responsibility.
 
-Every new label updates the appropriate rule definitions during the same run. A new module receives a definition and a scenario section in its category's reference. A new scenario is added under its parent module. A proposed top-level category also updates the main skill's definitions and routing. New definitions are marked pending review. Later APIs can reuse them, and adopting a pending definition or parent carries the review flag into their results. Human approval updates the definition's status.
+New-label proposals and short reasons are stored in the current run's `data/run_data/<run-id>/api-classification/classification-evidence.jsonl`. Candidate definitions may be reused within that run. Shared reference definitions are updated only after human review; the classification run does not edit them directly. Existing database classifications can be reused without retrieving explanations from previous runs.
 
-Decision rationales, documentation evidence, review reasons, and label proposals are intermediate artifacts stored outside the skill directory.
-
-```text
-data/api-classification/<run-id>/
-  classification-evidence.jsonl
-  input-documents.jsonl
-  new-label-proposals.json
-  manifest.json
-```
+The current database-refresh, representative-selection, missing-field completion, and preliminary adaptation-category rules are maintained in [Step 2.1](../steps/step2.1-api_prepare.md), with a [workflow explanation](step2.1-api-refresh-and-completion.md). Only missing business fields on representative rows are completed; alias rows are not filled. Historical dataset construction and evaluation results below remain as recorded.
 
 We evaluated the initial frozen rules through blind tests. Evaluators received the rules, API names, and documentation evidence, with the test labels withheld.
 
@@ -43,4 +35,4 @@ The local Claude Code configuration displayed `deepseek-v4.1-flash`. These perce
 
 These scores precede the complete-output and new-label policy. The revised policy produced complete candidates for all 394 new APIs from version 2.15. This validates output completeness; measuring its accuracy requires independently approved three-level labels.
 
-Each PR includes the SQLite classification changes, matching reference changes, and the evidence artifacts in `data/`. Human reviewers approve or revise uncertain decisions and new names, definitions, and boundaries. Review decisions are then synchronized across the database, references, and proposal registry. Accepted definitions become reusable guidance for subsequent classification runs.
+Each PR includes the SQLite classification changes and evidence artifacts from the current run. Reference definitions are updated after review. Human reviewers approve or revise uncertain decisions and new names, definitions, and boundaries. Review decisions are then synchronized across the database, references, and proposal registry. Accepted definitions become reusable guidance for subsequent classification runs.

@@ -285,14 +285,15 @@ class OfflineIntegrationTests(unittest.TestCase):
         path = self.run / 'log/api-refresh/batches.jsonl'
         return [set(json.loads(line)) for line in path.read_text().splitlines()]
 
-    def test_real_offline_install_updates_requirements_and_resumes_only_missing_api(self):
+    def test_dependency_recovery_resumes_missing_api_then_groups_full_public_set(self):
         make_wheel(self.wheels, 'resume-probe', 'resume_probe', '1.0', requires=('torch==0.0.1',))
         before = runtime.target_packages(self.python)
         result = self.execute()
         self.assertEqual(result['status'], 'DATABASE_REFRESHED')
         self.assertEqual(result['added'], 2)
         self.assertEqual(self.extract_calls, 1)
-        self.assertEqual(self.batches(), [{'torch.present', 'torch.gone', 'torch.needs'}, {'torch.needs'}])
+        self.assertEqual(self.batches(), [{'torch.present', 'torch.gone', 'torch.needs'}, {'torch.needs'},
+                                          {'torch.present', 'torch.gone', 'torch.needs'}])
         self.assertIn('resume-probe==1.0', self.defaults.read_text())
         self.assertIn('resume-probe==1.0', (self.run / 'requirements.txt').read_text())
         self.assertEqual(runtime.target_packages(self.python), before)
@@ -310,7 +311,8 @@ class OfflineIntegrationTests(unittest.TestCase):
         self.assertEqual(checkpoint['missing'], {'torch.needs': 'resume_probe'})
         make_wheel(self.wheels, 'resume-probe', 'resume_probe', '1.0')
         self.execute(extractor=lambda work: self.fail('Must not crawl again on resume'))
-        self.assertEqual(self.batches(), [{'torch.present', 'torch.gone', 'torch.needs'}, {'torch.needs'}])
+        self.assertEqual(self.batches(), [{'torch.present', 'torch.gone', 'torch.needs'}, {'torch.needs'},
+                                          {'torch.present', 'torch.gone', 'torch.needs'}])
         self.assertIn('resume-probe==1.0', self.defaults.read_text())
 
     def test_completed_refresh_crawls_again_on_next_invocation(self):
@@ -338,7 +340,8 @@ class OfflineIntegrationTests(unittest.TestCase):
         self.execute(extractor=lambda work: self.fail('Do not recrawl when the wheel changed'))
         self.assertEqual(self.batches(), [
             {'torch.present', 'torch.gone', 'torch.needs'},
-            {'torch.present', 'torch.gone', 'torch.needs'}, {'torch.needs'}])
+            {'torch.present', 'torch.gone', 'torch.needs'}, {'torch.needs'},
+            {'torch.present', 'torch.gone', 'torch.needs'}])
 
     def test_existing_custom_checker_callback_is_not_replaced(self):
         calls = []

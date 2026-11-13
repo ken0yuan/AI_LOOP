@@ -1,6 +1,6 @@
 # 分布式
 
-新增定义只登记到 data/api-classification/classification-evidence.jsonl，人工审核通过后再写入本文件。
+新增定义只登记到 data/run_data/<run-id>/api-classification/classification-evidence.jsonl，人工审核通过后再写入本文件。
 
 本文件在分类已确定为分布式后使用。先按模块定义选择一个细分模块，再只在该模块内按场景定义选择一个细分场景。示例是定义的辅助证据，不能跳过这两个判断。
 

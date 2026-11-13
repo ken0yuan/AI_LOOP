@@ -100,6 +100,14 @@ class Resolver:
             part = parts[index]
             path = '.'.join(parts[:index + 1])
             try:
+                # This singleton forwards to a per-device cache. Its declared
+                # API can be inspected without initializing CUDA on an NPU host.
+                if ('.'.join(parts[:index]) == 'torch.backends.cuda.cufft_plan_cache'
+                        and index == len(parts) - 1 and part in {'clear', 'size', 'max_size'}):
+                    cache_type = importlib.import_module('torch.backends.cuda').cuFFTPlanCache
+                    inspect.getattr_static(cache_type, part)
+                    return {'status': 'declared_field', 'field_evidence': 'device_proxy_class',
+                            'declaring_class': 'torch.backends.cuda.cuFFTPlanCache', 'trace': trace}
                 if inspect.isclass(obj):
                     owner_class = '.'.join(parts[:index])
                     try:
@@ -125,7 +133,7 @@ class Resolver:
                             if module_error.name == path:
                                 raise attr_error
                             raise
-                if isinstance(value, (classmethod, staticmethod)):
+                if isinstance(value, staticmethod):
                     value = value.__func__
                 obj = value
                 self.cache[path] = obj
@@ -157,8 +165,15 @@ def audit(inventory, output, discovered=None):
                 for line in source:
                     if line.strip():discovered_names.add(json.loads(line)['name'])
     rows = []
+    identities = {}
     for i, record in enumerate(records):
         row = {**record, **resolver.resolve(record['name'], record['role'])}
+        if row['status'] == 'resolved':
+            obj = resolver.cache.get(record['name'])
+            if obj is not None and not isinstance(obj, (str, bytes, int, float, complex, bool)):
+                group = identities.setdefault(id(obj), {'object': obj, 'names': []})
+                assert group['object'] is obj
+                group['names'].append(record['name'])
         if row['status'] == 'unresolved':
             anchor = unquote(urldefrag(record['url'])[1])
             if anchor != record['name'] and anchor.startswith('torch.') and all(p.isidentifier() for p in anchor.split('.')):
@@ -182,7 +197,9 @@ def audit(inventory, output, discovered=None):
                             'torch_npu_installed': importlib.util.find_spec('torch_npu') is not None,
                             'created_at_utc': datetime.now(timezone.utc).isoformat(),
                             'scope': 'Name lookup only; no API invocation or class instantiation; public/private names retained.'},
-              'summary': summary, 'rows': rows}
+              'summary': summary, 'rows': rows,
+              'identity_groups': [g['names'] for g in identities.values()
+                                  if len(g['names']) > 1]}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     output.with_suffix('.unresolved.jsonl').write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows if r['status'] not in ('resolved', 'declared_field', 'documented_alias')), encoding='utf-8')

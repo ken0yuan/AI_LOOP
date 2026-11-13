@@ -90,13 +90,13 @@ class InventoryExtractionTests(unittest.TestCase):
                                 'torch.distributed.elastic.fn'})
         self.assertEqual(len(self.calls), 1)
 
-    def test_multiple_index_names_for_same_target_are_deduplicated(self):
+    def test_multiple_index_names_for_same_target_are_preserved(self):
         self.data = inventory([
             ('torch.a', 'py:function', 'generated/torch.a.html#$'),
             ('torch.alias', 'py:function', 'generated/torch.a.html#torch.a'),
         ])
         self.invoke()
-        self.assertEqual(json.loads(self.output.read_text())['torch'], ['a'])
+        self.assertEqual(json.loads(self.output.read_text())['torch'], ['a', 'alias'])
 
     def test_repeated_extraction_has_identical_json(self):
         self.invoke()
@@ -158,7 +158,7 @@ class InventoryExtractionTests(unittest.TestCase):
     def test_conflicting_targets_for_same_api_are_rejected(self):
         self.data = inventory([
             ('torch.a', 'py:function', 'one.html#torch.a'),
-            ('torch.alias', 'py:function', 'two.html#torch.a'),
+            ('torch.a', 'py:function', 'two.html#torch.a'),
         ])
         with self.assertRaisesRegex(ValueError, 'Conflicting declaration pages'):
             self.invoke()

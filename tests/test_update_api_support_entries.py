@@ -40,7 +40,7 @@ class CompleteEntriesTests(unittest.TestCase):
         self.names = self.task / 'api-refresh/new-apis.json'
         self.names.write_text('[]', encoding='utf-8')
         self.entries = self.task / 'api-entries.jsonl'
-        self.evidence = self.root / 'data/api-classification/classification-evidence.jsonl'
+        self.evidence = self.task / 'api-classification/classification-evidence.jsonl'
         self.database = self.root / 'data/api-support.sqlite3'
         definitions = ','.join('"' + c + '" TEXT' + (' PRIMARY KEY' if c == 'API名称' else '') for c in update.COLUMNS)
         with self.connection() as conn:
@@ -73,7 +73,7 @@ class CompleteEntriesTests(unittest.TestCase):
         self.names.write_text(json.dumps(names if names is not None else [f['API名称'] for f in fields]), encoding='utf-8')
         self.entries.write_text(''.join(json.dumps(f, ensure_ascii=False) + '\n' for f in fields), encoding='utf-8')
         if reasons:
-            update.save_reasons([self.reason(f['API名称']) for f in fields], root=self.root)
+            update.save_reasons([self.reason(f['API名称']) for f in fields], basic_information=self.basic, root=self.root)
 
     def run_complete(self):
         return update.complete(self.basic, root=self.root)
@@ -95,7 +95,7 @@ class CompleteEntriesTests(unittest.TestCase):
         self.assertEqual(fields['本地是否适配'], '是')
         self.assertEqual(fields['分类待审核'], '是')
         self.assertEqual(set(update.shared_reasons(self.evidence)['torch.new_api']), {'api', *update.REASONS})
-        self.assertFalse((self.task / 'api-classification').exists())
+        self.assertFalse((self.root / 'data/api-classification').exists())
 
     def test_consumes_real_refresh_registration(self):
         fields = self.fields()
@@ -114,6 +114,75 @@ class CompleteEntriesTests(unittest.TestCase):
         self.assertEqual(result['completed'], 1)
         self.assertNotIn('skipped_apis', result)
         self.assertEqual(self.rows()['torch.new_api'], fields)
+
+    def test_missing_type_requires_both_category_and_module_to_be_basic_compute(self):
+        fields = self.fields(existing={'API适配分类': None})
+        fields['分类'] = '基础计算'
+        fields['细分模块'] = '基础计算'
+        fields['API适配分类'] = '框架类API'
+        self.write([fields])
+        self.run_complete()
+        self.assertEqual(self.rows()['torch.new_api']['API适配分类'], '算子类API')
+
+    def test_only_one_basic_compute_label_still_maps_to_framework(self):
+        for name, category, module in [('torch.first', '基础计算', '神经网络'),
+                                        ('torch.second', 'Core', '基础计算')]:
+            with self.subTest(category=category, module=module):
+                fields = self.fields(name, existing={'API适配分类': None})
+                fields.update({'分类':category, '细分模块':module, 'API适配分类':'算子类API'})
+                self.write([fields])
+                self.run_complete()
+                self.assertEqual(self.rows()[name]['API适配分类'], '框架类API')
+
+    def test_existing_adaptation_type_is_preserved_under_new_initial_rule(self):
+        fields = self.fields(existing={'分类':'基础计算', '细分模块':'基础计算',
+                                       'API适配分类':'框架类API'})
+        fields.update({'分类':'基础计算', '细分模块':'基础计算'})
+        self.write([fields])
+        self.run_complete()
+        self.assertEqual(self.rows()['torch.new_api']['API适配分类'], '框架类API')
+
+    def test_missing_type_with_existing_category_needs_no_document_explanation(self):
+        fields = self.fields(existing={'API适配分类': None})
+        self.write([fields])
+        self.run_complete()
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "API适配分类"=NULL, "分类待审核"=?', ('否',))
+        self.evidence.unlink()
+        self.run_complete()
+        self.assertEqual(self.rows()['torch.new_api']['API适配分类'], '框架类API')
+        self.assertEqual(self.rows()['torch.new_api']['分类待审核'], '是')
+
+    def test_partial_classification_keeps_parent_labels_and_marks_new_value_for_review(self):
+        fields = self.fields(existing={'分类':'Core', '细分模块':'fixture-module', '分类待审核':'否'})
+        fields['分类待审核'] = '是'
+        self.write([fields])
+        self.run_complete()
+        self.assertEqual(self.rows()['torch.new_api'], fields)
+
+    def test_existing_classification_cannot_be_rewritten_during_completion(self):
+        fields = self.fields(existing={'分类':'Core', '细分模块':'fixture-module'})
+        fields['分类'] = '基础计算'
+        self.write([fields])
+        before = self.rows()
+        with self.assertRaisesRegex(ValueError, 'preserve 分类'):
+            self.run_complete()
+        self.assertEqual(self.rows(), before)
+
+    def test_business_only_gap_needs_no_reclassification_and_keeps_last_columns(self):
+        fields = self.fields()
+        self.write([fields])
+        self.run_complete()
+        with self.connection() as conn:
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "api首次出现版本" TEXT')
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "API真正名字" TEXT')
+            conn.execute('UPDATE "API支持数据" SET "适配策略"=NULL, "api首次出现版本"=?', ('2.14',))
+        self.evidence.unlink()
+        self.run_complete()
+        row = self.rows()['torch.new_api']
+        self.assertEqual(row['适配策略'], '补充testcase')
+        self.assertEqual(row['api首次出现版本'], '2.14')
+        self.assertIsNone(row['API真正名字'])
 
     def test_extra_nested_fields_and_partial_batch_roll_back(self):
         first = self.fields('torch.first')
@@ -145,7 +214,7 @@ class CompleteEntriesTests(unittest.TestCase):
         self.write([fields])
         reason = self.reason()
         reason['new_label_reasons'] = {'scenario': 'Existing scenarios cover execution, while this API manages a new lifetime boundary.'}
-        update.save_reasons([reason], root=self.root)
+        update.save_reasons([reason], basic_information=self.basic, root=self.root)
         with self.assertRaisesRegex(ValueError, 'not registered'):
             self.run_complete()
         proposal = {'level':'scenario', 'parent':['Core','fixture-module'], 'name':'fixture-scenario',
@@ -153,7 +222,7 @@ class CompleteEntriesTests(unittest.TestCase):
                     'do_not_apply_when':'General execution APIs.', 'example_apis':['torch.new_api'],
                     'why_existing_does_not_fit':'Existing scenarios cover execution only.', 'review_status':'待审核',
                     'reference_file':'references/api-classification/core.md'}
-        update.save_definitions([proposal], root=self.root)
+        update.save_definitions([proposal], basic_information=self.basic, root=self.root)
         with self.assertRaisesRegex(ValueError, 'target reference'):
             self.run_complete()
         ref = self.root/proposal['reference_file']
@@ -173,7 +242,7 @@ class CompleteEntriesTests(unittest.TestCase):
                     'do_not_apply_when':'General execution APIs.', 'example_apis':['torch.new_api'],
                     'why_existing_does_not_fit':'Existing scenarios cover execution only.', 'review_status':'已审核',
                     'reference_file':'references/api-classification/core.md'}
-        update.save_definitions([proposal], root=self.root)
+        update.save_definitions([proposal], basic_information=self.basic, root=self.root)
         ref = self.root/proposal['reference_file']
         ref.parent.mkdir(parents=True)
         ref.write_text('Existing reviewed scenario definitions only.', encoding='utf-8')
@@ -185,7 +254,8 @@ class CompleteEntriesTests(unittest.TestCase):
 
     def test_missing_review_flag_defaults_to_yes_and_human_reviewed_value_is_preserved(self):
         first = self.fields('torch.first', existing={'分类待审核': None})
-        second = self.fields('torch.second', existing={'分类待审核': '否'})
+        second = self.fields('torch.second', existing={'分类待审核': '否', '分类':'Core',
+                                                     '细分模块':'fixture-module', '细分场景':'fixture-scenario'})
         self.write([first, second])
         self.run_complete()
         self.assertEqual(self.rows()['torch.first']['分类待审核'], '是')
@@ -213,9 +283,9 @@ class CompleteEntriesTests(unittest.TestCase):
         self.fields()
         first = self.reason('torch.first')
         second = self.reason('torch.second')
-        update.save_reasons([first,second], root=self.root)
+        update.save_reasons([first,second], basic_information=self.basic, root=self.root)
         first['scenario_reason'] = 'A revised short scenario reason.'
-        update.save_reasons([first], root=self.root)
+        update.save_reasons([first], basic_information=self.basic, root=self.root)
         reasons = update.shared_reasons(self.evidence)
         self.assertEqual(reasons, {'torch.first': first, 'torch.second': second})
         self.assertEqual(len(self.evidence.read_text(encoding='utf-8').splitlines()),2)
@@ -229,8 +299,8 @@ class CompleteEntriesTests(unittest.TestCase):
                     'why_existing_does_not_fit':'Existing scenarios cover execution only.', 'review_status':'待审核',
                     'reference_file':'references/api-classification/core.md'}
         for _ in range(2):
-            update.save_definitions([proposal], root=self.root)
-            update.save_reasons([self.reason()], root=self.root)
+            update.save_definitions([proposal], basic_information=self.basic, root=self.root)
+            update.save_reasons([self.reason()], basic_information=self.basic, root=self.root)
         reasons, definitions = update.classification_evidence(self.evidence)
         self.assertEqual(len(reasons), 1)
         self.assertEqual(len(definitions), 1)
@@ -244,13 +314,13 @@ class CompleteEntriesTests(unittest.TestCase):
         self.write([fields])
         reason = self.reason()
         reason['new_label_reasons'] = {'category': 'None of the five category definitions covers this distinct fixture responsibility.'}
-        update.save_reasons([reason], root=self.root)
+        update.save_reasons([reason], basic_information=self.basic, root=self.root)
         proposal = {'level':'category', 'parent':[], 'name':'fixture-new-category',
                     'definition':'A distinct fixture responsibility.', 'apply_when':'Fixture-specific APIs.',
                     'do_not_apply_when':'Existing five responsibilities.', 'example_apis':['torch.new_api'],
                     'why_existing_does_not_fit':'None of the five category definitions fits.', 'review_status':'待审核',
                     'reference_file':'references/api-classification/rules.md'}
-        update.save_definitions([proposal], root=self.root)
+        update.save_definitions([proposal], basic_information=self.basic, root=self.root)
         rules = self.root/proposal['reference_file']
         rules.parent.mkdir(parents=True)
         rules.write_text('Existing category definitions.', encoding='utf-8')
@@ -267,10 +337,10 @@ class CompleteEntriesTests(unittest.TestCase):
         reason = self.reason()
         reason['scenario_reason'] = 'x'*101
         with self.assertRaisesRegex(ValueError,'100 characters'):
-            update.save_reasons([reason], root=self.root)
+            update.save_reasons([reason], basic_information=self.basic, root=self.root)
         self.assertFalse(self.evidence.exists())
         reason = self.reason()
-        update.save_reasons([reason], root=self.root)
+        update.save_reasons([reason], basic_information=self.basic, root=self.root)
         once = self.evidence.read_bytes()
         self.evidence.write_bytes(once+once)
         with self.assertRaisesRegex(ValueError,'Duplicate shared'):
@@ -304,11 +374,11 @@ class CompleteEntriesTests(unittest.TestCase):
 
     def test_reason_publish_failure_preserves_old_explanations(self):
         self.fields()
-        update.save_reasons([self.reason()],root=self.root)
+        update.save_reasons([self.reason()],basic_information=self.basic, root=self.root)
         before = self.evidence.read_bytes()
         with patch.object(update.os,'replace',side_effect=OSError('fixture output failure')):
             with self.assertRaisesRegex(OSError,'output failure'):
-                update.save_reasons([self.reason('torch.other')],root=self.root)
+                update.save_reasons([self.reason('torch.other')],basic_information=self.basic, root=self.root)
         self.assertEqual(self.evidence.read_bytes(),before)
         self.assertEqual(list(self.evidence.parent.glob('*.tmp')),[])
 

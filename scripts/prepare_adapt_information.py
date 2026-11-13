@@ -60,25 +60,49 @@ def prepare(basic_information, database=None, *, root=ROOT):
     conn = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
     try:
         columns = {r[1] for r in conn.execute('PRAGMA table_info("API支持数据")')}
-        if not {'API名称', '本地是否适配'} <= columns:
-            raise ValueError('Database requires API名称 and 本地是否适配 columns')
-        records = conn.execute('SELECT "API名称","本地是否适配" FROM "API支持数据"').fetchall()
+        needed = {'API名称', '本地是否适配', '是否对外', '是否支持', 'API真正名字'}
+        if not needed <= columns:
+            raise ValueError('Database requires API名称, 本地是否适配, 是否对外, 是否支持 and API真正名字')
+        conn.row_factory = sqlite3.Row
+        records = conn.execute('SELECT * FROM "API支持数据"').fetchall()
     finally:
         conn.close()
-    rows = dict(records)
+    rows = {row['API名称']: dict(row) for row in records}
     if len(rows) != len(records):
         raise ValueError('API名称 must be unique in the support database')
     names = extract_apis(description, rows)
-    branches, skipped = [], []
+    branches, skipped, reasons, resolved = [], [], {}, {}
+    unavailable = False
     for name in names:
-        if rows[name] == '是':
-            branches.append('adapt-' + name)
-        elif rows[name] == '否':
+        row = rows[name]
+        if row['是否对外'] != '是' or row['是否支持'] == 'API删除，待下线':
             skipped.append(name)
+            reasons[name] = '原名称不是可用的对外API'
+            unavailable = True
+            continue
+        target = row['API真正名字'] or name
+        representative = rows.get(target)
+        if representative is None or representative['API真正名字']:
+            raise ValueError(f'{name}: invalid API真正名字; repair the representative relationship')
+        if representative['是否对外'] != '是' or representative['是否支持'] == 'API删除，待下线':
+            skipped.append(name)
+            reasons[name] = '正名不是可用的对外API'
+            unavailable = True
+            continue
+        resolved[name] = target
+        if representative['本地是否适配'] == '是':
+            branch = 'adapt-' + target
+            if branch not in branches:
+                branches.append(branch)
+        elif representative['本地是否适配'] == '否':
+            skipped.append(name)
+            reasons[name] = '正名的本地是否适配为否'
         else:
             raise ValueError(f'{name}: 本地是否适配 must be 是 or 否')
-    if not branches:
-        return {'status': 'NO_ADAPTATION_REQUIRED', 'matched': len(names), 'skipped_apis': skipped}
+    summary = {'matched': len(names), 'skipped_apis': skipped, 'skip_reasons': reasons,
+               'resolved_apis': resolved}
+    if not branches and not output.exists():
+        return {'status': 'NO_ADAPTATION_REQUIRED', **summary}
     result = read_json(output) if output.exists() else {}
     if not isinstance(result, dict):
         raise ValueError('Existing adapt-information.json must be a JSON object')
@@ -91,11 +115,14 @@ def prepare(basic_information, database=None, *, root=ROOT):
     if isinstance(original_request, dict):
         original_request = list(original_request.values())
     if current_request != branches and original_request != branches:
-        if isinstance(previous, dict) and previous.get('status') in {
-                'PREPARING', 'MERGE_CONFLICT', 'MERGE_PENDING', 'FAILED'}:
+        pending = isinstance(previous, dict) and previous.get('status') in {
+            'PREPARING', 'MERGE_CONFLICT', 'MERGE_PENDING', 'FAILED'}
+        if pending and branches and not unavailable:
             raise ValueError('Finish the pending Step 3 preparation before changing the API selection')
-        result.pop('development-branch', None)
-        result.pop('git-control', None)
+        if branches and not pending:
+            result.pop('development-branch', None)
+            result.pop('git-control', None)
+    if current_request != branches or not branches:
         result.pop('adapt-plan', None)
         result.pop('dispatcher', None)
     result['task-branches'] = branches
@@ -105,8 +132,8 @@ def prepare(basic_information, database=None, *, root=ROOT):
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
-    return {'status': 'ADAPT_INFORMATION_READY', 'matched': len(names), 'branches': len(branches),
-            'skipped_apis': skipped, 'output': str(output)}
+    return {'status': 'ADAPT_INFORMATION_READY' if branches else 'NO_ADAPTATION_REQUIRED',
+            **summary, 'branches': len(branches), 'output': str(output)}
 
 
 def main():

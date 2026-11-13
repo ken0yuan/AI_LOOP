@@ -25,7 +25,8 @@ SCHEMA = '''CREATE TABLE "API支持数据" (
  CHECK ("API适配分类" IN ('框架类API','算子类API','专项适配API')),
  "是否对外" TEXT, "分类" TEXT, "细分模块" TEXT, "细分场景" TEXT,
  "适配策略" TEXT, "本地是否适配" TEXT,
- "分类待审核" TEXT NOT NULL DEFAULT '否' CHECK ("分类待审核" IN ('是','否'))
+ "分类待审核" TEXT NOT NULL DEFAULT '否' CHECK ("分类待审核" IN ('是','否')),
+ "API真正名字" TEXT
 )'''
 
 TORCH = '''from types import SimpleNamespace
@@ -138,20 +139,41 @@ class RefreshTests(unittest.TestCase):
         result = self.run_refresh({'torch.stay', 'torch.new_api', 'torch.not_yet_built'})
         after = self.rows()
         self.assertEqual(result['status'], 'DATABASE_REFRESHED')
-        self.assertEqual(self.checked, [{'torch.new_api', 'torch.not_yet_built', 'torch.docgone', 'torch.gone'}])
+        self.assertEqual(self.checked, [{'torch.stay', 'torch.new_api', 'torch.not_yet_built',
+                                        'torch.docgone', 'torch.gone',
+                                        'torch.already_offline', 'torch.special'}])
         self.assertEqual(after['torch.docgone']['是否支持'], '文档删除，待下线')
         self.assertEqual(after['torch.gone']['是否支持'], 'API删除，待下线')
-        for name in ['torch.stay', 'torch.internal', 'torch.already_offline', 'torch.special']:
+        for name in ['torch.stay', 'torch.internal', 'torch.already_offline']:
             self.assertEqual(after[name], before[name])
+        self.assertEqual(after['torch.special']['是否支持'], 'API删除，待下线')
         for name in ['torch.docgone', 'torch.gone']:
             self.assertEqual({k:v for k,v in after[name].items() if k != '是否支持'},
                              {k:v for k,v in before[name].items() if k != '是否支持'})
-        self.assertNotIn('torch.not_yet_built', after)
+        self.assertEqual(after['torch.not_yet_built']['是否支持'], 'API删除，待下线')
         self.assertEqual(after['torch.new_api']['是否对外'], '是')
         self.assertEqual(after['torch.new_api']['分类待审核'], '是')
-        self.assertEqual(after['torch.new_api']['API适配分类'], '框架类API')
+        self.assertIsNone(after['torch.new_api']['API适配分类'])
         self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api'])
         self.assert_clean()
+
+    def test_document_removed_but_present_in_wheel_stays_in_handoff(self):
+        self.insert('torch.docgone')
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('UPDATE "API支持数据" SET "细分场景"=NULL WHERE "API名称"=?', ('torch.docgone',))
+        self.output.parent.mkdir(parents=True)
+        self.output.write_text(json.dumps(['torch.docgone']))
+        self.run_refresh({'torch.stay'})
+        self.assertEqual(self.rows()['torch.docgone']['是否支持'], '文档删除，待下线')
+        self.assertIn('torch.docgone', json.loads(self.output.read_text()))
+
+    def test_missing_from_wheel_is_removed_from_handoff(self):
+        self.insert('torch.gone')
+        self.output.parent.mkdir(parents=True)
+        self.output.write_text(json.dumps(['torch.gone']))
+        self.run_refresh({'torch.stay'})
+        self.assertEqual(self.rows()['torch.gone']['是否支持'], 'API删除，待下线')
+        self.assertNotIn('torch.gone', json.loads(self.output.read_text()))
 
     def test_adaptation_category_default_and_three_value_constraint(self):
         self.insert('torch.stay')
@@ -176,19 +198,196 @@ class RefreshTests(unittest.TestCase):
         self.insert('Tensor.old')
         self.run_refresh({'torch.Tensor.add'})
         rows = self.rows()
-        self.assertEqual(self.checked, [{'torch.Tensor.old'}])
+        self.assertEqual(self.checked, [{'torch.Tensor.add', 'torch.Tensor.old'}])
         self.assertEqual(set(rows), {'Tensor.add', 'Tensor.old'})
         self.assertEqual(rows['Tensor.add']['是否支持'], '支持')
         self.assertEqual(rows['Tensor.old']['是否支持'], '文档删除，待下线')
         self.assertEqual(json.loads(self.output.read_text()), [])
 
-    def test_existing_internal_name_is_not_promoted_or_inserted_again(self):
+    def test_existing_internal_name_is_promoted_without_duplicate_insert(self):
         self.insert('torch.new_api', public='否')
         before = self.rows()
         self.run_refresh({'torch.new_api'})
-        self.assertEqual(self.checked, [set()])
-        self.assertEqual(self.rows(), before)
+        self.assertEqual(self.checked, [{'torch.new_api'}])
+        expected = before['torch.new_api'].copy()
+        expected['是否对外'] = '是'
+        self.assertEqual(self.rows(), {'torch.new_api': expected})
         self.assertEqual(json.loads(self.output.read_text()), [])
+
+    def test_incomplete_promoted_row_is_handed_off_without_replacing_existing_fields(self):
+        self.insert('torch.new_api', public='否')
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('UPDATE "API支持数据" SET "细分场景"=NULL WHERE "API名称"=?', ('torch.new_api',))
+        before = self.rows()['torch.new_api']
+        self.run_refresh({'torch.new_api'})
+        expected = dict(before, 是否对外='是')
+        self.assertEqual(self.rows()['torch.new_api'], expected)
+        self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api'])
+
+    def test_completed_previous_handoff_is_removed_on_rerun(self):
+        self.insert('torch.stay')
+        self.output.parent.mkdir(parents=True)
+        self.output.write_text(json.dumps(['torch.stay']))
+        self.run_refresh({'torch.stay'})
+        self.assertEqual(json.loads(self.output.read_text()), [])
+
+    def test_promoted_shorter_representative_inherits_only_missing_business_fields(self):
+        self.insert('torch.new_api')
+        self.insert('torch.a', public='否')
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('UPDATE "API支持数据" SET "细分场景"=NULL, "适配策略"=? WHERE "API名称"=?',
+                         ('keep-internal-strategy', 'torch.a'))
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\na = new_api\n')
+        self.run_refresh({'torch.new_api', 'torch.a'})
+        row = self.rows()['torch.a']
+        self.assertEqual(row['细分场景'], 'fixture-scenario')
+        self.assertEqual(row['适配策略'], 'keep-internal-strategy')
+        self.assertEqual(self.rows()['torch.new_api']['API真正名字'], 'torch.a')
+        self.assertEqual(json.loads(self.output.read_text()), [])
+
+    def test_schema_migration_keeps_rows_indexes_and_triggers_and_allows_null_type(self):
+        self.insert('torch.stay')
+        before = self.rows()['torch.stay']
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('CREATE INDEX fixture_strategy ON "API支持数据" ("适配策略")')
+            conn.execute('CREATE TABLE fixture_audit (name TEXT)')
+            conn.execute('CREATE TRIGGER fixture_added AFTER INSERT ON "API支持数据" '
+                         'BEGIN INSERT INTO fixture_audit VALUES (new."API名称"); END')
+        self.run_refresh({'torch.stay', 'torch.new_api'})
+        self.assertEqual(self.rows()['torch.stay'], before)
+        self.assertIsNone(self.rows()['torch.new_api']['API适配分类'])
+        with sqlite3.connect(self.database) as conn:
+            metadata = {r[1]: r for r in conn.execute('PRAGMA table_info("API支持数据")')}
+            self.assertEqual(metadata['API适配分类'][3:5], (0, None))
+            self.assertIsNotNone(conn.execute("SELECT name FROM sqlite_master WHERE name='fixture_strategy'").fetchone())
+            self.assertEqual(conn.execute('SELECT name FROM fixture_audit').fetchall(), [('torch.new_api',)])
+            self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
+    def test_documented_existing_name_missing_from_wheel_is_offlined(self):
+        self.insert('torch.missing_from_wheel')
+        self.run_refresh({'torch.stay', 'torch.missing_from_wheel'})
+        self.assertEqual(self.rows()['torch.missing_from_wheel']['是否支持'], 'API删除，待下线')
+        self.assertIn('torch.missing_from_wheel', self.checked[0])
+
+    def test_internal_object_alias_is_not_scanned_or_changed(self):
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\na = new_api\n')
+        self.insert('torch.a', public='否')
+        before = self.rows()['torch.a']
+        self.run_refresh({'torch.new_api'})
+        self.assertEqual(self.checked, [{'torch.new_api'}])
+        self.assertEqual(self.rows()['torch.a'], before)
+        self.assertIsNone(self.rows()['torch.new_api']['API真正名字'])
+
+    def test_internal_tensor_shorthand_is_not_promoted_by_fuzzy_matching(self):
+        self.insert('Tensor.add', public='否')
+        before = self.rows()['Tensor.add']
+        self.run_refresh({'torch.Tensor.add'})
+        self.assertEqual(self.rows()['Tensor.add'], before)
+        self.assertEqual(self.rows()['torch.Tensor.add']['是否对外'], '是')
+
+    def test_shortest_public_name_redirects_existing_long_name_and_inherits_business(self):
+        self.insert('torch.new_api')
+        self.insert('torch.old_alias')
+        self.insert('torch.historical_alias')
+        self.insert('torch.internal_alias', public='否')
+        with sqlite3.connect(self.database) as conn:
+            for name in ['torch.old_alias', 'torch.historical_alias', 'torch.internal_alias']:
+                conn.execute('UPDATE "API支持数据" SET "API真正名字"=? WHERE "API名称"=?',
+                             ('torch.new_api', name))
+        internal_before = self.rows()['torch.internal_alias']
+        before = self.rows()['torch.new_api']
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\na = new_api\nold_alias = new_api\nhistorical_alias = new_api\n')
+        self.run_refresh({'torch.new_api', 'torch.a', 'torch.old_alias'})
+        rows = self.rows()
+        self.assertEqual(rows['torch.new_api']['API真正名字'], 'torch.a')
+        self.assertEqual(rows['torch.old_alias']['API真正名字'], 'torch.a')
+        self.assertEqual(rows['torch.historical_alias']['API真正名字'], 'torch.a')
+        self.assertEqual(rows['torch.internal_alias'], internal_before)
+        self.assertIsNone(rows['torch.a']['API真正名字'])
+        for column in ['是否支持', '分类', '细分模块', '细分场景', '适配策略', '本地是否适配']:
+            self.assertEqual(rows['torch.a'][column], before[column])
+        self.assertEqual(json.loads(self.output.read_text()), [])
+
+    def test_same_length_uses_name_order_and_alias_rows_are_retained(self):
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\naa = new_api\nbb = new_api\n')
+        self.run_refresh({'torch.aa', 'torch.bb'})
+        rows = self.rows()
+        self.assertEqual(set(rows), {'torch.aa', 'torch.bb'})
+        self.assertIsNone(rows['torch.aa']['API真正名字'])
+        self.assertEqual(rows['torch.bb']['API真正名字'], 'torch.aa')
+        self.assertEqual(json.loads(self.output.read_text()), ['torch.aa'])
+
+    def test_new_api_compares_with_existing_public_object_not_in_current_docs(self):
+        self.insert('torch.stay')
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\na = stay\n')
+        self.run_refresh({'torch.a'})
+        self.assertEqual(self.checked, [{'torch.a', 'torch.stay'}])
+        self.assertEqual(self.rows()['torch.stay']['API真正名字'], 'torch.a')
+        self.assertIsNone(self.rows()['torch.a']['API真正名字'])
+
+    def test_gpu_cache_proxy_is_checked_without_initializing_a_device(self):
+        backend = self.torch / 'backends'
+        backend.mkdir()
+        (backend / '__init__.py').write_text('')
+        (backend / 'cuda.py').write_text('''
+class cuFFTPlanCache:
+    def clear(self): raise AssertionError('Must not call API')
+    @property
+    def size(self): raise AssertionError('Must not read device state')
+    @property
+    def max_size(self): raise AssertionError('Must not read device state')
+class Manager:
+    def __getattr__(self, name): raise AssertionError('Must not initialize CUDA')
+cufft_plan_cache = Manager()
+''')
+        docs = {'torch.backends.cuda.cufft_plan_cache.' + n for n in ['clear', 'size', 'max_size']}
+        self.run_refresh(docs)
+        self.assertEqual(set(self.rows()), docs)
+        self.assertTrue(all(row['是否支持'] != 'API删除，待下线' for row in self.rows().values()))
+
+    def test_cached_backfill_report_cannot_modify_internal_aliases(self):
+        import backfill_api_aliases as backfill
+        self.insert('torch.stay')
+        self.insert('torch.new_api')
+        self.insert('torch.internal', public='否')
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('UPDATE "API支持数据" SET "API真正名字"=? WHERE "API名称"=?',
+                         ('old-internal-reference', 'torch.internal'))
+        before = self.rows()['torch.internal']
+        directory = self.task / 'backfill'; directory.mkdir()
+        with patch.object(backfill, 'DB', self.database):
+            columns, rows = backfill.read_database()
+            original = [c for c in columns if c != 'API真正名字']
+            values = [[r[columns.index(c)] for c in original] for r in rows]
+            report = {'original_columns': original,
+                      'original_digest': backfill.input_digest(original, values),
+                      'aliases': {'torch.new_api': 'torch.stay', 'torch.internal': 'torch.stay'},
+                      'summary': {'rows': 3, 'alias_rows': 2}}
+            (directory / 'identity-audit.json').write_text(json.dumps(report))
+            backfill.apply(directory)
+        self.assertEqual(self.rows()['torch.internal'], before)
+        self.assertEqual(self.rows()['torch.new_api']['API真正名字'], 'torch.stay')
+        self.assertEqual(json.loads((directory / 'verification.json').read_text())['alias_rows'], 1)
+
+    def test_distinct_objects_remain_separate_despite_identical_behavior(self):
+        self.run_refresh({'torch.stay', 'torch.new_api'})
+        self.assertTrue(all(row['API真正名字'] is None for row in self.rows().values()))
+        self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api', 'torch.stay'])
+
+    def test_alias_identity_is_rechecked_when_wheel_exposure_changes(self):
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\nlong_alias = stay\n')
+        self.run_refresh({'torch.stay', 'torch.long_alias'})
+        self.assertEqual(self.rows()['torch.long_alias']['API真正名字'], 'torch.stay')
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\ndef long_alias(): raise AssertionError("not called")\n')
+        self.run_refresh({'torch.stay', 'torch.long_alias'})
+        self.assertIsNone(self.rows()['torch.long_alias']['API真正名字'])
 
     def test_tensor_class_and_member_queries_match_both_spellings(self):
         for full, short in [('torch.Tensor', 'Tensor'), ('torch.Tensor.add', 'Tensor.add')]:
@@ -204,14 +403,14 @@ class RefreshTests(unittest.TestCase):
         before = self.rows()
         self.run_refresh({'torch.Tensor'})
         self.assertEqual(self.rows(), before)
-        self.assertEqual(self.checked, [set()])
+        self.assertEqual(self.checked, [{'torch.Tensor'}])
         self.assertEqual(json.loads(self.output.read_text()), [])
 
     def test_missing_documented_tensor_class_is_checked_by_full_wheel_name(self):
         self.insert('Tensor')
         self.insert('torch.stay')
         self.run_refresh({'torch.stay'})
-        self.assertEqual(self.checked, [{'torch.Tensor'}])
+        self.assertEqual(self.checked, [{'torch.Tensor', 'torch.stay'}])
         self.assertEqual(self.rows()['Tensor']['是否支持'], '文档删除，待下线')
         self.assertNotIn('torch.Tensor', self.rows())
 
@@ -224,10 +423,10 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(json.loads(self.output.read_text()), ['torch.later'])
         self.assertIn('torch.later', self.rows())
 
-    def test_repeated_task_preserves_handoff_and_does_not_recheck_common_names(self):
+    def test_repeated_task_preserves_handoff_and_rechecks_all_documented_names(self):
         self.run_refresh({'torch.new_api'})
         self.run_refresh({'torch.new_api'})
-        self.assertEqual(self.checked, [{'torch.new_api'}, set()])
+        self.assertEqual(self.checked, [{'torch.new_api'}, {'torch.new_api'}])
         self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api'])
         self.assertEqual(len(self.rows()), 1)
         self.assert_clean()
