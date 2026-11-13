@@ -17,7 +17,7 @@
 
 ## 1. 选择模板，对照材料与代码
 
-模板优先级：用户指定模板 → 目标仓适用的 PR 模板 → [默认 PR 模板](../templates/pr-template.md)。本次目标仓实际存在 `.gitcode/PULL_REQUEST_TEMPLATE.md`；默认模板保留其“合入来源、修改方案、资料变更、接口变更、功能验证、CheckList”结构，给出材料填写位置。后续仍需读取目标分支的最新模板，不因已有本地模板而跳过仓库规范。
+模板优先级：用户指定模板 → 目标分支的 PR 模板及贡献要求 → [默认 PR 模板](../templates/pr-template.md)。默认模板提供“合入来源、修改方案、资料变更、接口变更、功能验证、CheckList”等栏目的填写位置。
 
 | 模板内容 | 来源与核对方式 |
 |---|---|
@@ -32,7 +32,7 @@
 
 已有测试记录覆盖充分且对应当前代码时可直接引用，不为整理正文机械重跑。缺少记录、测试后又改了相关代码、日志与结论冲突或必要测试失败时，交回补充或执行受影响的验证，解决前不发布。“用例已生成”不等于运行通过。
 
-按 [PR #49212 的完整闭环参考](../references/success-case-49212.md) 验收实际执行：补充 API 用例需确认测试开关已开启，实际使用了要求的设备，本批范围确实执行，结果不是整批跳过。当前 api-adaptation 的 Step1 明确暂不开发，交回 `not_run` 时应返回 Step 4 保留阶段性成果，不能通过编写 PR 正文补成“已测试通过”，也不在发布步骤里绕过未实现的执行环节。
+按 [PR #49212 的完整闭环参考](../references/success-case-49212.md) 验收实际执行：补充 API 用例需确认测试开关已开启，实际使用了要求的设备，本批范围确实执行，结果不是整批跳过。api-adaptation交回`not_run`、跳过、阻塞或未完成适配时，返回Step 4保留阶段性成果，不能通过编写PR正文补成“已测试通过”。逐API状态为`支持`后仍须核对对应执行材料。
 
 ## 2. 填写正文，检查缺项
 
@@ -46,7 +46,7 @@
 
 `SOURCE` 为源码目录，`RUN_DIR` 为结果目录，均用绝对路径；`BRANCH` 为实际开发分支，`UPSTREAM_REPO` / `FORK_REPO` 为核实的主仓 / fork 的 `owner/repo`，`BASE` 为本批目标分支，现有 AI_LOOP 流程使用 `master`。
 
-确认当前分支、origin 的 push 地址及 upstream 与交接相符，没有冲突或未完成 merge / rebase；不要为模拟修改正式源码仓远端。
+确认当前分支、origin 的 push 地址及 upstream 与交接相符，没有冲突或未完成 merge / rebase。
 
 ```bash
 gitcode auth status
@@ -102,7 +102,9 @@ gitcode pr view "$PR_NUMBER" -R "$UPSTREAM_REPO" --json
 gitcode pr diff "$PR_NUMBER" -R "$UPSTREAM_REPO" --json
 ```
 
-保留 `pr-body.md`、本地来源对照和真实测试材料引用，在 `pr.json` 记录 `status`、`repository`、`number`、`url`、`fork`、`head`、`base`、`commit`、`remote-sha`、`issue-url`、`verification`；AI_LOOP 中保留 `run-id`。`verification` 指向已有材料，不强制复制或改写上游报告。
+保留 `pr-body.md`、本地来源对照和真实测试材料引用，由执行本步的主agent在本次运行目录生成或更新`pr.json`，记录 `status`、`repository`、`number`、`url`、`fork`、`head`、`base`、`commit`、`remote-sha`、`issue-url`、`verification`，并保存本次`adapt-information.json.api-status`的发布快照；AI_LOOP 中保留 `run-id`。`verification` 指向已有材料，不强制复制或改写上游报告。
+
+发布快照只保存本分支负责的API状态，缺项从本批任务材料补齐。继承代码对应的其他分支任务仍由原PR负责回填；本批的数据库策略和支持结论由[Step 0.1](step0.1-pr_reconciliation.md)在PR合入后回填。
 
 任务和必要验证完成、代码已推送、PR 已核实后交 [Step 5](step5-pr_tracking&branch_management.md) 跟踪评审及 CI。失败时交回原因和已有材料，恢复本批，不虚报完成或开始下一批。
 

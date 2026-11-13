@@ -123,7 +123,9 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertNotEqual(result['development-branch'], branch)
         self.assertEqual(self.adapt(basic)['git-control']['action'], 'EXTEND')
         self.assertTrue(step3.ancestor(self.repo, previous))
-        self.assertEqual(set(step3.read_object(self.mapping).values()), {result['development-branch']})
+        self.assertEqual(step3.read_object(self.mapping), {
+            'adapt-Tensor.foo': branch, 'adapt-Tensor.bar': branch,
+            'adapt-Tensor.baz': result['development-branch']})
         self.assertEqual(len(step3.read_object(self.mapping)), 3)
         self.assertEqual(self.g('rev-parse', branch), previous)
 
@@ -142,13 +144,15 @@ class DevelopmentBranchTests(unittest.TestCase):
             self.assertTrue(step3.ancestor(self.repo, commit))
         self.assertFalse(step3.ancestor(self.repo, unrelated))
         mapping = step3.read_object(self.mapping)
-        for alias in ['foo', 'bar', 'baz', 'qux']:
-            self.assertEqual(mapping['adapt-Tensor.' + alias], branch)
+        self.assertEqual(mapping['adapt-Tensor.foo'], 'adapt-set-left')
+        self.assertEqual(mapping['adapt-Tensor.bar'], 'adapt-set-left')
+        self.assertEqual(mapping['adapt-Tensor.baz'], 'adapt-set-right')
+        self.assertEqual(mapping['adapt-Tensor.qux'], branch)
         self.assertEqual(mapping['adapt-Tensor.other'], 'adapt-set-unrelated')
         self.assertEqual(self.g('rev-parse', 'origin/adapt-set-left'), left)
         later_basic = self.task('Tensor.bar', run='later')
         later = self.run_step3(later_basic)
-        self.assertEqual(self.adapt(later_basic)['git-control']['source-branches'], [branch])
+        self.assertEqual(self.adapt(later_basic)['git-control']['source-branches'], ['adapt-set-left'])
         self.assertNotIn('development-branch', later)
 
     def test_reuses_local_master_already_updated_by_step0(self):
@@ -244,7 +248,10 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(result['status'], 'BRANCH_READY')
         self.assertEqual(result['development-branch'], branch)
         self.assertTrue(step3.ancestor(self.repo, third))
-        self.assertEqual(set(step3.read_object(self.mapping).values()), {branch})
+        self.assertEqual(step3.read_object(self.mapping), {
+            'adapt-Tensor.foo':'adapt-set-left', 'adapt-Tensor.bar':'adapt-set-left',
+            'adapt-Tensor.baz':'adapt-set-right', 'adapt-Tensor.qux':'adapt-set-third',
+            'adapt-Tensor.new':branch})
 
     def test_missing_mapped_branch_stops_without_creating_replacement(self):
         self.record(**{'adapt-Tensor.foo': 'adapt-set-missing'})
@@ -471,7 +478,9 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertIn('测试按要求暂不执行', result['message'])
         self.assertEqual(adapt['git-control']['checkout-base'], 'refs/heads/adapt-set-dependency')
         self.assertEqual(self.g('rev-parse', 'origin/adapt-set-dependency'), dependency)
-        self.assertEqual(set(step3.read_object(self.mapping).values()), {branch})
+        self.assertEqual(step3.read_object(self.mapping), {
+            'adapt-Tensor.foo':'adapt-set-dependency', 'adapt-Tensor.bar':'adapt-set-dependency',
+            'adapt-Tensor.new':branch})
         retry = self.run_step3(basic)
         self.assertEqual(retry['status'], 'BRANCH_READY')
         self.assertEqual(retry['task-branches'], ['adapt-Tensor.new'])
@@ -563,7 +572,9 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(result['task-branches'], ['feature-checkpoint'])
         self.assertIn('测试按要求暂不执行', result['message'])
         self.assertEqual(set(step3.read_object(self.mapping)), {'fix-timeout', 'legacy-feature', 'feature-checkpoint'})
-        self.assertEqual(set(step3.read_object(self.mapping).values()), {branch})
+        self.assertEqual(step3.read_object(self.mapping), {
+            'fix-timeout':'adapt-set-dependency', 'legacy-feature':'adapt-set-dependency',
+            'feature-checkpoint':branch})
         self.assertTrue(step3.ancestor(self.repo, dependency))
         self.assertEqual(self.run_step3(basic)['status'], 'BRANCH_READY')
 
@@ -651,6 +662,24 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(self.adapt(basic)['task-branches'], ['feature-checkpoint'])
         self.assertEqual(self.adapt(basic)['git-control']['source-branches'], ['adapt-set-local-work'])
         self.assertNotIn('source-commits', self.adapt(basic)['git-control'])
+
+    def test_child_retries_after_merged_source_task_record_is_removed(self):
+        self.source_branch('adapt-set-dependency')
+        self.record(**{'fix-timeout':'adapt-set-dependency'})
+        basic = self.named_tasks(['fix-timeout','feature-checkpoint'])
+        first = self.run_step3(basic)
+        self.g('checkout','master',repo=self.seed)
+        self.g('merge','--ff-only','adapt-set-dependency',repo=self.seed)
+        self.g('push','origin','master',repo=self.seed)
+        self.g('fetch','upstream','master')
+        self.g('branch','-f','master','upstream/master')
+        self.record(**{'feature-checkpoint':first['development-branch']})
+        result = self.run_step3(basic)
+        self.assertEqual(result['development-branch'],first['development-branch'])
+        self.assertEqual(result['task-branches'],['feature-checkpoint'])
+        self.assertEqual(self.adapt(basic)['git-control']['source-branches'],['adapt-set-dependency'])
+        self.assertTrue(self.g('branch','--list','adapt-set-dependency'))
+        self.assertEqual(step3.read_object(self.mapping),{'feature-checkpoint':first['development-branch']})
 
     def test_retry_uses_updated_local_dependency_and_discards_legacy_snapshot(self):
         self.source_branch('adapt-set-dependency')

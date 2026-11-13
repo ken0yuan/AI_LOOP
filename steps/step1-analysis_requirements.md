@@ -1,6 +1,6 @@
 # Step 1：分析需求
 
-Step 1先读取`data/run_data/<run-id>/`下的`basic_information.json`和`requirements.txt`，确认基础信息中的`preparation_status`为`INPUTS_READY`、`environment_status`为`ENV_READY`，以及`python`、`venv`、`activate`、`pytorch_source`和`torch_npu_latest_source`指向的文件或目录存在。所有本地路径均以AI_LOOP根目录为起点。缺少文件、状态未就绪或引用路径不存在时，停止并说明缺项。
+完成[Step 0.1](step0.1-pr_reconciliation.md)的本轮同步后，读取`data/run_data/<run-id>/`下的`basic_information.json`和`requirements.txt`，确认基础信息中的`preparation_status`为`INPUTS_READY`、`environment_status`为`ENV_READY`，以及`python`、`venv`、`activate`、`pytorch_source`和`torch_npu_latest_source`指向的文件或目录存在。所有本地路径均以AI_LOOP根目录为起点。缺少文件、状态未就绪或引用路径不存在时，停止并说明缺项。
 
 ## 问题分拣
 

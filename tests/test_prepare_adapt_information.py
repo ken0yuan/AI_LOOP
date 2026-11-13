@@ -41,6 +41,7 @@ class AdaptInformationTests(unittest.TestCase):
             conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "是否对外" TEXT DEFAULT "是"')
             conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "是否支持" TEXT DEFAULT "支持"')
             conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "API真正名字" TEXT')
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "适配策略" TEXT DEFAULT "补充testcase"')
         self.output = self.task / 'adapt-information.json'
 
     def description(self, text):
@@ -64,6 +65,49 @@ class AdaptInformationTests(unittest.TestCase):
         self.description('API `torch.Tensor.add` needs adaptation; 同一接口 Tensor.add，torch.Tensor.add().')
         self.run_prepare()
         self.assertEqual(json.loads(self.output.read_text(encoding='utf-8'))['task-branches'], ['adapt-Tensor.add'])
+
+    def test_shorter_representative_reuses_existing_task_and_checkpoint(self):
+        with self.connection() as conn:
+            conn.executemany('INSERT INTO "API支持数据" '
+                             '("API名称","本地是否适配","是否对外","是否支持","API真正名字","适配策略") '
+                             'VALUES (?,?,?,?,?,?)', [
+                ('torch.new_api','是','是','未提供','torch.a','补充testcase'),
+                ('torch.a','是','是','未提供',None,'补充testcase')])
+        task = 'adapt-torch.new_api'
+        mapping = self.root/'data/branch-mapping.json'
+        mapping.write_text(json.dumps({task:'existing-work','fix-timeout':'other-work'}), encoding='utf-8')
+        checkpoint = {'workflow-version':2,'status':'FAILED','branch':'existing-work',
+                      'requested-branches':[task],'remaining-branches':[task]}
+        self.output.write_text(json.dumps({'task-branches':[task],'development-branch':'existing-work',
+                                          'git-control':checkpoint}), encoding='utf-8')
+        before_mapping, before_db = mapping.read_bytes(), self.database.read_bytes()
+        self.description('API `torch.new_api`; API `torch.a`')
+        self.run_prepare()
+        saved = json.loads(self.output.read_text(encoding='utf-8'))
+        self.assertEqual(saved['task-branches'], [task])
+        self.assertEqual(saved['development-branch'], 'existing-work')
+        self.assertEqual(saved['git-control'], checkpoint)
+        self.assertEqual(mapping.read_bytes(), before_mapping)
+        self.assertEqual(self.database.read_bytes(), before_db)
+
+    def test_supported_representative_is_not_dispatched_again(self):
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "适配策略"=? WHERE "API名称"=?', ('已支持','Tensor.add'))
+            conn.execute('UPDATE "API支持数据" SET "API真正名字"=? WHERE "API名称"=?', ('Tensor.add','view'))
+        self.description('API `Tensor.add` and API `view` and API `torch.nn.functional.relu` need adaptation')
+        result = self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_text(encoding='utf-8'))['task-branches'], ['adapt-torch.nn.functional.relu'])
+        self.assertEqual(set(result['skipped_apis']), {'Tensor.add','view'})
+
+    def test_all_supported_stops_and_clears_old_tasks(self):
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "适配策略"=? WHERE "API名称"=?', ('已支持','Tensor.add'))
+        self.description('API `Tensor.add` needs adaptation')
+        self.output.write_text(json.dumps({'task-branches':['adapt-Tensor.add'],'api-status':{'Tensor.add':'支持'}}),encoding='utf-8')
+        self.assertEqual(self.run_prepare()['status'], 'NO_ADAPTATION_REQUIRED')
+        saved = json.loads(self.output.read_text(encoding='utf-8'))
+        self.assertEqual(saved['task-branches'], [])
+        self.assertNotIn('api-status', saved)
 
     def test_class_alias_and_bare_api_name(self):
         self.description('API `Tensor` needs adaptation; API `view` needs adaptation.')
@@ -232,6 +276,18 @@ class AdaptInformationTests(unittest.TestCase):
         self.assertNotIn('dispatcher', result)
         self.assertEqual(result['other'], 'keep')
 
+    def test_api_status_survives_same_selection_but_not_a_new_batch(self):
+        self.description('API `Tensor.add` needs adaptation')
+        self.run_prepare()
+        result = json.loads(self.output.read_text(encoding='utf-8'))
+        result['api-status'] = {'Tensor.add': '支持'}
+        self.output.write_text(json.dumps(result), encoding='utf-8')
+        self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_text(encoding='utf-8'))['api-status'], {'Tensor.add': '支持'})
+        self.description('API `view` needs adaptation')
+        self.run_prepare()
+        self.assertNotIn('api-status', json.loads(self.output.read_text(encoding='utf-8')))
+
     def test_changed_selection_preserves_pending_step3_recovery(self):
         self.description('API `Tensor.add` needs adaptation')
         self.output.write_text('{"task-branches":{"view":"adapt-view"},"git-control":{"status":"MERGE_CONFLICT"}}', encoding='utf-8')
@@ -239,6 +295,20 @@ class AdaptInformationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'pending Step 3'):
             self.run_prepare()
         self.assertEqual(self.output.read_bytes(), before)
+
+    def test_merged_source_is_filtered_without_losing_child_recovery(self):
+        self.description('API `Tensor.add`; API `view`')
+        checkpoint = {'workflow-version': 2, 'status': 'MERGE_CONFLICT',
+                      'requested-branches': ['adapt-Tensor.add','adapt-view'],
+                      'remaining-branches': ['adapt-view'], 'branch': 'adapt-set-child'}
+        self.output.write_text(json.dumps({'task-branches': ['adapt-Tensor.add','adapt-view'],
+                                          'git-control': checkpoint}), encoding='utf-8')
+        with self.connection() as conn:
+            conn.execute('UPDATE "API支持数据" SET "适配策略"=? WHERE "API名称"=?',('已支持','Tensor.add'))
+        self.run_prepare()
+        saved = json.loads(self.output.read_text(encoding='utf-8'))
+        self.assertEqual(saved['task-branches'], ['adapt-view'])
+        self.assertEqual(saved['git-control'], checkpoint)
 
     def test_same_selection_preserves_pending_step3_recovery(self):
         self.description('API `Tensor.add` needs adaptation')

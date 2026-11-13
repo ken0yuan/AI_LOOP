@@ -60,9 +60,9 @@ def prepare(basic_information, database=None, *, root=ROOT):
     conn = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
     try:
         columns = {r[1] for r in conn.execute('PRAGMA table_info("API支持数据")')}
-        needed = {'API名称', '本地是否适配', '是否对外', '是否支持', 'API真正名字'}
+        needed = {'API名称', '本地是否适配', '是否对外', '是否支持', 'API真正名字', '适配策略'}
         if not needed <= columns:
-            raise ValueError('Database requires API名称, 本地是否适配, 是否对外, 是否支持 and API真正名字')
+            raise ValueError('Database requires API名称, 本地是否适配, 是否对外, 是否支持, API真正名字 and 适配策略')
         conn.row_factory = sqlite3.Row
         records = conn.execute('SELECT * FROM "API支持数据"').fetchall()
     finally:
@@ -71,6 +71,20 @@ def prepare(basic_information, database=None, *, root=ROOT):
     if len(rows) != len(records):
         raise ValueError('API名称 must be unique in the support database')
     names = extract_apis(description, rows)
+    mapping_path = root / 'data/branch-mapping.json'
+    mapping = read_json(mapping_path) if mapping_path.exists() else {}
+    if not isinstance(mapping, dict):
+        raise ValueError('branch-mapping.json must contain task-to-branch mappings')
+    existing_tasks = {}
+    for task in mapping:
+        if not task.startswith('adapt-'):
+            continue
+        mapped_name = match_api_name(task[len('adapt-'):], rows)
+        if mapped_name is None:
+            continue
+        mapped_row = rows[mapped_name]
+        if mapped_row['是否对外'] == '是' and mapped_row['是否支持'] != 'API删除，待下线':
+            existing_tasks.setdefault(mapped_row['API真正名字'] or mapped_name, task)
     branches, skipped, reasons, resolved = [], [], {}, {}
     unavailable = False
     for name in names:
@@ -90,8 +104,13 @@ def prepare(basic_information, database=None, *, root=ROOT):
             unavailable = True
             continue
         resolved[name] = target
+        if representative['适配策略'] == '已支持':
+            skipped.append(name)
+            reasons[name] = '正名的适配策略已支持'
+            unavailable = True
+            continue
         if representative['本地是否适配'] == '是':
-            branch = 'adapt-' + target
+            branch = existing_tasks.get(target, 'adapt-' + target)
             if branch not in branches:
                 branches.append(branch)
         elif representative['本地是否适配'] == '否':
@@ -122,9 +141,12 @@ def prepare(basic_information, database=None, *, root=ROOT):
         if branches and not pending:
             result.pop('development-branch', None)
             result.pop('git-control', None)
+            result.pop('api-status', None)
     if current_request != branches or not branches:
         result.pop('adapt-plan', None)
         result.pop('dispatcher', None)
+    if not branches:
+        result.pop('api-status', None)
     result['task-branches'] = branches
     content = (json.dumps(result, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
     temporary = stage_output(output, content)

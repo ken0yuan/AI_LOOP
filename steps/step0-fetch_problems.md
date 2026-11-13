@@ -62,6 +62,10 @@ python3 -B scripts/install_env.py --run-dir data/run_data/<run-id>
 4. 读取本次`basic_information.json`中的`pytorch_wheel`和`torch_npu_wheel`，安装指定的PyTorch和torch-npu安装包。
 5. 检查实际Python、PyTorch、torch-npu版本及导入位置；通过后，将本次`basic_information.json`的`environment_status`写为`ENV_READY`，同时补入`python`、`venv`和`activate`。失败时将`environment_status`写为`FAILED`并记录`environment_error`；下次重新准备源码或wheel时，环境状态重置为`NOT_READY`，重新安装并检查后才恢复就绪。
 
+## 同步PR与开发记录
+
+环境安装完成、`environment_status=ENV_READY`后，进入[Step 0.1](step0.1-pr_reconciliation.md)同步已合入PR和开发记录。每次运行都执行该同步，完成后再进入Step 1分析本次需求。
+
 ## 输出目录
 
 每个任务使用独立目录`data/run_data/<run-id>/`，保存两份必需文件和按实际输入提供的PR、CI材料：

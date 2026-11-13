@@ -389,6 +389,22 @@ cufft_plan_cache = Manager()
         self.run_refresh({'torch.stay', 'torch.long_alias'})
         self.assertIsNone(self.rows()['torch.long_alias']['API真正名字'])
 
+    def test_alias_becoming_independent_is_handed_off_for_missing_fields(self):
+        self.insert('torch.stay')
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\nlong_alias = stay\n')
+        self.run_refresh({'torch.stay', 'torch.long_alias'})
+        self.assertEqual(self.rows()['torch.long_alias']['API真正名字'], 'torch.stay')
+        self.assertEqual(json.loads(self.output.read_text()), [])
+        before = self.rows()['torch.stay']
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\ndef long_alias(): raise AssertionError("not called")\n')
+        self.run_refresh({'torch.stay', 'torch.long_alias'})
+        self.assertIsNone(self.rows()['torch.long_alias']['API真正名字'])
+        self.assertIsNone(self.rows()['torch.long_alias']['API适配分类'])
+        self.assertEqual(json.loads(self.output.read_text()), ['torch.long_alias'])
+        self.assertEqual(self.rows()['torch.stay'], before)
+
     def test_tensor_class_and_member_queries_match_both_spellings(self):
         for full, short in [('torch.Tensor', 'Tensor'), ('torch.Tensor.add', 'Tensor.add')]:
             self.assertEqual(refresh.match_api_name(full, {short}), short)

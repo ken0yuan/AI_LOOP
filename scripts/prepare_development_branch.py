@@ -176,6 +176,8 @@ def plan(repo, request, mapping, available):
 def validate_mapping_snapshot(state, mapping):
     target = state['branch']
     for alias, original in state['original-mappings'].items():
+        if original in state['source-branches'] and mapping.get(alias) is None:
+            continue
         if mapping.get(alias) not in (original, target):
             raise ValueError('Task-to-development-branch mapping changed during preparation: ' + alias)
     inherited = {alias for alias, branch in mapping.items() if branch in state['source-branches']}
@@ -220,6 +222,13 @@ def normalize_checkpoint(state):
     state['checkout-base'] = ('refs/heads/' + sources[0]
                               if state['remaining-branches'] and sources else 'refs/heads/master')
     return state
+
+
+def refresh_completed_sources(state, mapping, repo):
+    # Source branches remain usable after their completed task records are removed.
+    if any(original in state['source-branches'] and mapping.get(task) is None
+           for task, original in state['original-mappings'].items()):
+        state['base-commit'] = refs(repo)['refs/heads/master']
 
 
 def result_from_state(state):
@@ -303,7 +312,7 @@ def execute(repo, path, adapt, state, mapping_path, mapping):
     mapping = load_mapping(mapping_path, repo)
     validate_mapping_snapshot(state, mapping)
     state['stop-task'] = False
-    mapping.update({alias: branch for alias in state['original-mappings']})
+    mapping.update({task: branch for task in state['remaining-branches']})
     write_json(mapping_path, mapping)
     # Keep the original selection so retry cannot misclassify newly assigned tasks.
     adapt['task-branches'] = list(state['remaining-branches'])
@@ -354,6 +363,7 @@ def prepare(basic_information, *, root=ROOT):
             state = normalize_checkpoint(previous)
             if request not in (state['requested-branches'], state['remaining-branches']):
                 raise ValueError('Task selection changed during a pending preparation; finish the original operation first')
+            refresh_completed_sources(state, mapping, repo)
         elif isinstance(previous, dict) and previous.get('status') in PENDING:
             raise ValueError('This pending preparation uses the previous workflow; preserve and reconcile it before restarting')
         else:

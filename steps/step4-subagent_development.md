@@ -42,6 +42,7 @@
 | 待处理API | 当前计划项的`task-branches`，去掉`adapt-`前缀得到API名称，保持本项原顺序和范围 |
 | API策略表 | AI_LOOP根目录下的`data/api-support.sqlite3`，表`API支持数据`；按`API名称`匹配，通过`API真正名字`定位正名，读取`适配策略`和`API适配分类`。Step0.1将分类加入用例生成交付件 |
 | 结果位置 | 本次run-id目录为任务结果目录，逐API结果保存为`api-loop/result.json`；测试文件写入本次torch_npu源码仓 |
+| 逐API状态 | subagent把进度写到本次`adapt-information.json`的`api-status`；测试通过为`支持`，需要继续适配为`待适配`，尚未完成的补测保持`补充testcase` |
 
 后续增加其他类型subagent时，在本节补充该类型需要的专属材料及其来源；通用信息沿用上一节。
 
@@ -49,6 +50,6 @@
 
 ## 第三步：生成PR
 
-全部计划项完成且开发、验证材料已收齐后，执行[Step 4.2：提交PR](step4.2-create_pr.md)。传入第一步的issue、问题分析、实际方案、各agent开发结果和测试记录的文件路径，以及本次源码和分支上下文；一份交接报告或多份文件均可。主agent按目标仓PR模板汇总，逐栏对照真实材料与代码，缺少完成证据或必要测试记录时先返回补充。正文核实后统一commit、push并创建或更新PR，关联第一步的issue，再将结果交给Step 5。
+API任务逐项状态为`支持`、全部计划项完成且开发和验证材料已收齐后，执行[Step 4.2：提交PR](step4.2-create_pr.md)。传入第一步的issue、问题分析、实际方案、各agent开发结果和测试记录的文件路径，以及本次源码和分支上下文；一份交接报告或多份文件均可。主agent按目标仓PR模板汇总，逐栏对照真实材料与代码，缺少完成证据或必要测试记录时先返回补充。正文核实后统一commit、push并创建或更新PR，关联第一步的issue，再将结果交给Step 5。
 
 存在未完成项或验证阻塞时，继续处理本批任务；subagent不独立提交issue或PR。

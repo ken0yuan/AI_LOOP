@@ -402,7 +402,9 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
         aliases, inherited = alias_updates(report, wheel_to_row, results, current)
         ready = {row_name for name, row_name in doc_to_row.items() if results[name]
                  and (row_name in inserted or row_name in promotions
-                      or current.get(row_name, {}).get('是否支持') in REMOVAL_MARKERS)}
+                      or current.get(row_name, {}).get('是否支持') in REMOVAL_MARKERS
+                      or (current.get(row_name, {}).get(ALIAS_COLUMN)
+                          and aliases.get(row_name) is None))}
         first_version = read_document_version(work) if inserted and FIRST_SEEN_COLUMN in state[0] else None
         handoff = publish(database, state, inserted, changes, output, first_version=first_version,
                           promotions=promotions, aliases=aliases, ready=ready, inherited=inherited)
