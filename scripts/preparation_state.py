@@ -76,9 +76,10 @@ def locked(path):
 def target_profile(config):
     if not re.fullmatch(r'3\.\d+\.\d+', config['python_version']):
         raise ValueError('python_version must be a full CPython 3.x.y version')
-    matches = [p for p in config['wheel_profiles'] if all(p.get(k) == config.get(k) for k in ENVIRONMENT[1:])]
+    matches = [p for p in config['wheel_profiles']
+               if all(p.get(k) == config.get(k) for k in ('os', 'architecture'))]
     if len(matches) != 1:
-        raise ValueError('No unique wheel profile for chip_type + os + architecture')
+        raise ValueError('No unique wheel profile for os + architecture')
     return matches[0]
 
 
@@ -86,13 +87,19 @@ def config_snapshot(config):
     # Keep transport settings, never authentication material.
     if any(k in config for k in ('infrastructure_root', 'infrastructure_settings')):
         raise ValueError('Legacy infrastructure_* settings are unsupported; configure AI_LOOP obs directly')
-    obs = config['obs']
-    transport = obs.get('downloader') or {}
-    return {'pytorch_repo': config['pytorch_repo'], 'torch_npu_repo': config['torch_npu_repo'],
+    def obs_snapshot(obs):
+        transport = obs.get('downloader') or {}
+        return {'bucket': obs['bucket'], 'downloader': {k: transport[k] for k in
+                ('type', 'bin', 'regional_proxy_endpoint', 'endpoint') if k in transport}}
+    result = {'pytorch_repo': config['pytorch_repo'], 'torch_npu_repo': config['torch_npu_repo'],
             'torch_npu_fork_repo': config.get('torch_npu_fork_repo'),
             'obs_prefix': config['obs_prefix'], 'wheel_profiles': copy.deepcopy(config['wheel_profiles']),
-            'obs': {'bucket': obs['bucket'], 'downloader': {k: transport[k] for k in
-                    ('type', 'bin', 'regional_proxy_endpoint') if k in transport}}}
+            'obs': obs_snapshot(config['obs'])}
+    if config.get('pytorch_source_obs_prefix'):
+        result['pytorch_source_obs_prefix'] = config['pytorch_source_obs_prefix']
+        if config.get('pytorch_source_obs'):
+            result['pytorch_source_obs'] = obs_snapshot(config['pytorch_source_obs'])
+    return result
 
 
 def load_basic(path, data_root):

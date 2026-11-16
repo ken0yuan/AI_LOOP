@@ -34,7 +34,7 @@ def extract_apis(description, rows):
         if name is not None:
             if name not in names:
                 names.append(name)
-        elif query.startswith(('torch.', 'torch_npu.', 'Tensor.')) or query in labelled:
+        elif query.startswith(('torch.', 'torch_npu.', 'Tensor.')) or query in explicit_bare:
             if query not in missing:
                 missing.append(query)
     if missing:
@@ -70,7 +70,16 @@ def prepare(basic_information, database=None, *, root=ROOT):
     rows = {row['API名称']: dict(row) for row in records}
     if len(rows) != len(records):
         raise ValueError('API名称 must be unique in the support database')
-    names = extract_apis(description, rows)
+    if description.strip() == 'New API needs adaptation':
+        names = read_json(basic_path.parent / 'api-refresh/added-apis.json')
+        if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+            raise ValueError('added-apis.json must be an API name array from this run refresh')
+        missing = [name for name in names if name not in rows]
+        if missing:
+            raise ValueError('APIs not registered in database: ' + ', '.join(missing))
+        names = list(dict.fromkeys(names))
+    else:
+        names = extract_apis(description, rows)
     mapping_path = root / 'data/branch-mapping.json'
     mapping = read_json(mapping_path) if mapping_path.exists() else {}
     if not isinstance(mapping, dict):

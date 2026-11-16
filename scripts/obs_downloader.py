@@ -149,17 +149,42 @@ class ObsutilDownloader:
         raise last_error
 
 
+class RoutedDownloader:
+    """Keep source and wheel reads on their configured bucket transports."""
+    def __init__(self, routes):
+        self.routes = sorted(routes.items(), key=lambda item: len(item[0]), reverse=True)
+
+    def _provider(self, url):
+        for prefix, provider in self.routes:
+            if url.startswith(prefix):
+                return provider
+        raise ObsDownloadError('No configured OBS route for: ' + url)
+
+    def list(self, prefix):
+        return self._provider(prefix).list(prefix)
+
+    def stat(self, url):
+        return self._provider(url).stat(url)
+
+    def download(self, url, dest):
+        return self._provider(url).download(url, dest)
+
+
 def make_downloader(obs_cfg: dict | None):
     """按配置构造下载器；未配置返回 None（由执行端记 blocked）。"""
     cfg = (obs_cfg or {}).get("downloader")
     if not cfg:
         return None
     kind = cfg.get("type")
+    if kind == 'public-obs':
+        from obs_public import PublicObsDownloader
+        return PublicObsDownloader(cfg['endpoint'], obs_cfg['bucket'],
+            regional_proxy_endpoint=cfg.get('regional_proxy_endpoint'))
     if kind == "obsutil":
         return ObsutilDownloader(cfg.get("bin", "obsutil"),
             regional_proxy_endpoint=cfg.get('regional_proxy_endpoint'),
             bucket=(obs_cfg or {}).get('bucket', 'pytorch-ci-cache'))
     raise ObsDownloadError(
-        f"未知 OBS 下载器类型 {kind!r}（当前支持 obsutil）；"
+        f"未知 OBS 下载器类型 {kind!r}（当前支持 obsutil/public-obs）；"
         "下载方式必须由部署配置显式给出"
     )

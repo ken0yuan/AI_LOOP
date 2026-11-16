@@ -29,12 +29,11 @@ def replace_text(path, text):
         temporary.unlink(missing_ok=True)
 
 
-def classification_closeout(conn, database, run, rows):
+def classification_closeout(conn, database, rows):
     """Prepare approved definitions and remove only this PR's API explanations."""
     root = database.parent.parent
     names = {row['API名称'] for row in rows if row['是否对外'] == '是'}
-    paths = {(run / 'api-classification/classification-evidence.jsonl'),
-             (database.parent / 'api-classification/classification-evidence.jsonl')}
+    paths = [database.parent / 'api-classification/classification-evidence.jsonl']
     levels = ['category', 'module', 'scenario']
     classifications = [[row[key] for key in ['分类', '细分模块', '细分场景']]
                        for row in rows if row['API名称'] in names]
@@ -148,7 +147,7 @@ def finish_merged(database, mapping_path, record_path, record, remote):
                 raise ValueError('同一正名出现相互冲突的状态: ' + canonical)
             canonical_status[canonical] = statuses[name]
         references, evidence, reasons_removed = classification_closeout(
-            conn, database, record_path.parent, list(rows.values()))
+            conn, database, list(rows.values()))
         for name, status in canonical_status.items():
             row = next(row for row in rows.values() if row['API名称'] == name)
             if row['是否对外'] != '是':

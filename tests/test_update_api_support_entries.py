@@ -40,7 +40,7 @@ class CompleteEntriesTests(unittest.TestCase):
         self.names = self.task / 'api-refresh/new-apis.json'
         self.names.write_text('[]', encoding='utf-8')
         self.entries = self.task / 'api-entries.jsonl'
-        self.evidence = self.task / 'api-classification/classification-evidence.jsonl'
+        self.evidence = self.root / 'data/api-classification/classification-evidence.jsonl'
         self.database = self.root / 'data/api-support.sqlite3'
         definitions = ','.join('"' + c + '" TEXT' + (' PRIMARY KEY' if c == 'API名称' else '') for c in update.COLUMNS)
         with self.connection() as conn:
@@ -95,7 +95,7 @@ class CompleteEntriesTests(unittest.TestCase):
         self.assertEqual(fields['本地是否适配'], '是')
         self.assertEqual(fields['分类待审核'], '是')
         self.assertEqual(set(update.shared_reasons(self.evidence)['torch.new_api']), {'api', *update.REASONS})
-        self.assertFalse((self.root / 'data/api-classification').exists())
+        self.assertFalse((self.task / 'api-classification/classification-evidence.jsonl').exists())
 
     def test_consumes_real_refresh_registration(self):
         fields = self.fields()
@@ -397,6 +397,36 @@ class CompleteEntriesTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(json.loads(result.stdout)['status'],'API_ENTRIES_READY')
         self.assertFalse(self.entries.exists())
+
+
+
+    def test_later_run_completes_using_reasons_saved_by_another_run(self):
+        fields = self.fields()
+        update.save_reasons([self.reason()], basic_information=self.basic, root=self.root)
+        later = self.root / 'data/run_data/later-adaptation'
+        (later / 'api-refresh').mkdir(parents=True)
+        basic = later / 'basic_information.json'
+        basic.write_bytes(self.basic.read_bytes())
+        (later / 'api-refresh/new-apis.json').write_text(json.dumps(['torch.new_api']))
+        (later / 'api-entries.jsonl').write_text(json.dumps(fields))
+        result = update.complete(basic, root=self.root)
+        self.assertEqual(result['completed'], 1)
+        self.assertEqual(self.rows()['torch.new_api'], fields)
+        self.assertEqual(result['classification'], str(self.evidence))
+        self.assertIn('torch.new_api', update.shared_reasons(self.evidence))
+        self.assertFalse((later / 'api-classification/classification-evidence.jsonl').exists())
+
+    def test_multiple_runs_preserve_unselected_api_reasons(self):
+        self.fields('torch.first')
+        self.fields('torch.second')
+        update.save_reasons([self.reason('torch.first')], basic_information=self.basic, root=self.root)
+        later = self.root / 'data/run_data/later-classification'
+        later.mkdir()
+        basic = later / 'basic_information.json'
+        basic.write_bytes(self.basic.read_bytes())
+        update.save_reasons([self.reason('torch.second')], basic_information=basic, root=self.root)
+        self.assertEqual(set(update.shared_reasons(self.evidence)), {'torch.first', 'torch.second'})
+        self.assertFalse((later / 'api-classification/classification-evidence.jsonl').exists())
 
 
 if __name__ == '__main__':

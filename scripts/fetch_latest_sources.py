@@ -49,7 +49,8 @@ def source_object(selection, config):
         return info
     identity=next(iter(selection['identities'].values()))
     short=identity['pytorch_short']
-    return {'url':config['obs_prefix'].rstrip('/')+'/pytorch-source-'+short+'.tar.gz','commit':short}
+    prefix = config.get('pytorch_source_obs_prefix', config['obs_prefix'])
+    return {'url':prefix.rstrip('/')+'/pytorch-source-'+short+'.tar.gz','commit':short}
 
 
 def replace_pytorch(config, selection, downloader, log, *, data_root):

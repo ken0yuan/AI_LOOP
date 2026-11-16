@@ -134,7 +134,7 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(self.git('branch','--list',child))
 
     def classification_material(self,review='已审核'):
-        directory=self.run/'api-classification';directory.mkdir()
+        directory=self.root/'data/api-classification';directory.mkdir()
         ref=self.root/'references/api-classification/compute.md';ref.parent.mkdir(parents=True);ref.write_text('# Existing definitions\n')
         with closing(sqlite3.connect(self.db)) as c,c:
             c.execute('UPDATE "API支持数据" SET "细分场景"=? WHERE "API名称"=?',('新场景','torch.foo'))
@@ -165,7 +165,7 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(self.git('branch','--list',self.branch))
 
     def test_merge_without_new_definition_deletes_finished_api_reason_file(self):
-        directory=self.run/'api-classification';directory.mkdir();path=directory/'classification-evidence.jsonl'
+        directory=self.root/'data/api-classification';directory.mkdir();path=directory/'classification-evidence.jsonl'
         path.write_text(json.dumps({'api':'torch.foo','category_reason':'finished'}),encoding='utf-8')
         self.merge_upstream();self.assertTrue(self.reconcile()['complete']);self.assertFalse(path.exists())
 

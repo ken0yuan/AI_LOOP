@@ -19,7 +19,7 @@ python3 -B scripts/reconcile_prs.py \
 
 1. **回填适配结果。** 按下表更新该PR负责的公开API正名行。
 2. **完成分类审核收尾。** 将本批正名的`分类待审核`改为`否`。使用了已批准的新分类时，将定义补入对应的`references/api-classification/`文件；相关新定义仍待审核时，先完成审核。
-3. **清理分类理由。** 删除`api-classification/classification-evidence.jsonl`中本批API的分类理由，其他API的理由和共享定义保持原样。
+3. **清理分类理由。** 删除`data/api-classification/classification-evidence.jsonl`中本批API的分类理由，其他API的理由和共享定义保持原样。
 4. **清理开发记录。** 移除`branch-mapping.json`中该PR已处理API的对应记录，再删除本地的`pr.json`跟踪文件。本地分支、origin分支和上游已合入PR均保留。
 
 | 发布时的API状态 | 合入后回填正名行 |

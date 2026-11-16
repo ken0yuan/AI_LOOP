@@ -76,6 +76,8 @@ python3 -B scripts/prepare_development_branch.py \
 
 ## 冲突与重试
 
+当前尚未遇到，未重点开发，TBD
+
 合并冲突时返回`MERGE_CONFLICT`和冲突文件列表，退出码2；保留当前开发分支，映射和任务名单暂不更新。agent在该分支解决冲突，暂存修改并执行`git diff --cached --check`，然后完成合并：
 
 ```bash

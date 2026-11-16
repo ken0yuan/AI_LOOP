@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Standalone AI_LOOP nightly wheel discovery, pairing, download and validation.
 
-No dependency on npu-test-infra. Authentication stays in the existing obsutil
-configuration; this module neither loads nor prints credentials.
+No dependency on npu-test-infra. Public wheels use anonymous HTTPS; private
+source authentication stays in obsutil configuration and is never printed.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ except ImportError:
     from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
     from pip._vendor.packaging.version import Version
 
-from obs_downloader import make_downloader
+from obs_downloader import make_downloader, RoutedDownloader
 from wheel_artifacts import wheel_identity, select_bundle
 import preparation_state as task_state
 import fetch_latest_sources as source_fetch
@@ -49,13 +49,33 @@ def load_provider(config):
     if any(key in config for key in ('infrastructure_root', 'infrastructure_settings')):
         raise ValueError('Legacy infrastructure_* settings are unsupported; configure AI_LOOP obs directly')
     obs = config.get('obs')
-    if not obs or obs.get('downloader', {}).get('type') != 'obsutil':
-        raise ValueError('AI_LOOP defaults need an explicit obs.downloader of type obsutil')
+    if not obs or obs.get('downloader', {}).get('type') not in {'obsutil', 'public-obs'}:
+        raise ValueError('AI_LOOP defaults need an explicit obs.downloader of type obsutil or public-obs')
     prefix = config.get('obs_prefix', '')
     if not prefix.startswith('obs://' + obs.get('bucket', '') + '/'):
         raise ValueError('obs.bucket and obs_prefix must refer to the same bucket')
     downloader = make_downloader(obs)
+    source_prefix = pytorch_source_prefix(config)
+    if source_prefix != prefix:
+        source_obs = config.get('pytorch_source_obs')
+        if not source_obs or not source_prefix.startswith('obs://' + source_obs.get('bucket', '') + '/'):
+            raise ValueError('Separate PyTorch source prefix needs a matching pytorch_source_obs provider')
+        source_downloader = make_downloader(source_obs)
+        if source_downloader is None:
+            raise ValueError('PyTorch source OBS downloader is not configured')
+        downloader = RoutedDownloader({prefix: downloader, source_prefix: source_downloader})
     return downloader, wheel_identity, select_bundle
+
+
+def pytorch_source_prefix(config):
+    return config.get('pytorch_source_obs_prefix', config['obs_prefix']).rstrip('/') + '/'
+
+
+def list_inputs(downloader, config):
+    wheels = downloader.list(config['obs_prefix'])
+    source_prefix = pytorch_source_prefix(config)
+    sources = wheels if source_prefix == config['obs_prefix'].rstrip('/') + '/' else downloader.list(source_prefix)
+    return wheels, sources
 
 
 def write_json(path, value):
@@ -83,14 +103,7 @@ def locked(path):
 
 
 def target_profile(config):
-    if not re.fullmatch(r'3\.\d+\.\d+', config['python_version']):
-        raise ValueError('python_version must be a full CPython 3.x.y version')
-    keys = ('chip_type', 'os', 'architecture')
-    matches = [p for p in config['wheel_profiles']
-               if all(p.get(k) == config.get(k) for k in keys)]
-    if len(matches) != 1:
-        raise ValueError('No unique wheel profile for chip_type + os + architecture')
-    return matches[0]
+    return task_state.target_profile(config)
 
 
 
@@ -126,7 +139,7 @@ def select_latest_pair(listing, config, identity, select_bundle):
             times.append(timestamp.timestamp())
         candidates.append((max(times), tuple(urls), bundle))
     if not candidates:
-        raise ValueError('No complete paired wheels match Python + chip/OS profile + architecture')
+        raise ValueError('No complete paired wheels match Python + OS profile + architecture')
     _, urls, bundle = max(candidates, key=lambda item: (item[0], item[1]))
     return {'bundle': bundle, 'objects': {u: selected_listing[u] for u in urls},
             'identities': {u: identity(u) for u in urls}}
@@ -257,14 +270,14 @@ def download_wheels(selection, downloader, config, *, data_root=None):
 def resolve(config):
     target_profile(config)
     downloader, identity, selector = load_provider(config)
-    listing = downloader.list(config['obs_prefix'])
+    listing, sources = list_inputs(downloader, config)
     # A complete framework input also needs the matching PyTorch source archive.
     filtered={url:meta for url,meta in listing.items() if not identity(url)
-              or config['obs_prefix'].rstrip('/')+'/pytorch-source-'+identity(url)['pytorch_short']+'.tar.gz' in listing}
+              or pytorch_source_prefix(config)+'pytorch-source-'+identity(url)['pytorch_short']+'.tar.gz' in sources}
     selection=select_latest_pair(filtered,config,identity,selector)
     short=next(iter(selection['identities'].values()))['pytorch_short']
-    source_url=config['obs_prefix'].rstrip('/')+'/pytorch-source-'+short+'.tar.gz'
-    selection['pytorch_source']={'url':source_url,'commit':short,**listing[source_url]}
+    source_url=pytorch_source_prefix(config)+'pytorch-source-'+short+'.tar.gz'
+    selection['pytorch_source']={'url':source_url,'commit':short,**sources[source_url]}
     return downloader,selection
 
 

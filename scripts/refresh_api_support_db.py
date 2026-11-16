@@ -250,7 +250,7 @@ def stage_output(path, content):
 
 
 def publish(database, initial_state, additions, changes, output, *, first_version=None,
-            promotions=(), aliases=None, ready=None, inherited=None):
+            promotions=(), aliases=None, ready=None, inherited=None, added_apis=None):
     """Write only names/statuses, preserving the rest of each stored row."""
     output.parent.mkdir(parents=True, exist_ok=True)
     old_output = output.read_bytes() if output.exists() else None
@@ -262,12 +262,24 @@ def publish(database, initial_state, additions, changes, output, *, first_versio
                   if row[columns.index('是否对外')] == '是'}
     if not set(previous) <= old_public:
         raise ValueError('Existing handoff contains names not present as public APIs in the database')
+    old_outputs = {output: old_output}
+    added_names = set(additions)
+    if added_apis is not None:
+        added_apis.parent.mkdir(parents=True, exist_ok=True)
+        old_added = added_apis.read_bytes() if added_apis.exists() else None
+        previous_added = json.loads(old_added) if old_added is not None else []
+        if (not isinstance(previous_added, list)
+                or not all(isinstance(name, str) for name in previous_added)
+                or not set(previous_added) <= old_public):
+            raise ValueError('Existing added-apis.json must name APIs inserted by this run')
+        added_names.update(previous_added)
+        old_outputs[added_apis] = old_added
     # Re-running keeps unfinished work, then checks the final representative.
     aliases = aliases or {}
     inherited = inherited or {}
     eligible = set(additions) if ready is None else set(ready)
-    temporary = None
-    replaced = False
+    temporaries = {}
+    replaced = []
     conn = None
     try:
         conn = sqlite3.connect(database.resolve().as_uri() + '?mode=rw', uri=True,
@@ -314,28 +326,34 @@ def publish(database, initial_state, additions, changes, output, *, first_versio
                     and missing_fields(representative)):
                 handoff.add(target)
         handoff = sorted(handoff)
-        content = (json.dumps(handoff, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
-        temporary = stage_output(output, content)
-        os.replace(temporary, output)
-        replaced = True
+        outputs = {output: handoff}
+        if added_apis is not None:
+            outputs[added_apis] = sorted(added_names)
+        for path, names in outputs.items():
+            content = (json.dumps(names, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+            temporaries[path] = stage_output(path, content)
+        for path, temporary in temporaries.items():
+            os.replace(temporary, path)
+            replaced.append(path)
         conn.commit()
     except BaseException:
         if conn is not None:
             conn.rollback()
-        if replaced:
-            if old_output is None:
-                output.unlink(missing_ok=True)
+        for path in reversed(replaced):
+            old_content = old_outputs[path]
+            if old_content is None:
+                path.unlink(missing_ok=True)
             else:
-                restored = stage_output(output, old_output)
+                restored = stage_output(path, old_content)
                 try:
-                    os.replace(restored, output)
+                    os.replace(restored, path)
                 finally:
                     restored.unlink(missing_ok=True)
         raise
     finally:
         if conn is not None:
             conn.close()
-        if temporary is not None:
+        for temporary in temporaries.values():
             temporary.unlink(missing_ok=True)
     return handoff
 
@@ -353,12 +371,15 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
         raise ValueError(f'Step 0 venv interpreter missing: {python}')
     database = resolve(database or 'data/api-support.sqlite3', root)
     output = resolve(new_apis, root) if new_apis else basic_information.parent / 'api-refresh/new-apis.json'
+    added_apis = basic_information.parent / 'api-refresh/added-apis.json'
     if not database.is_file():
         raise ValueError(f'Existing API database missing: {database}')
     if output.resolve() == database.resolve() or output.resolve() == basic_information.resolve():
         raise ValueError('Output must not overwrite the database or basic_information')
     if not output.resolve().is_relative_to(basic_information.parent.resolve()):
         raise ValueError('new-apis output must be inside this task directory')
+    if output.resolve() == added_apis.resolve():
+        raise ValueError('new-apis output must differ from the actual added API list')
     scripts = root / 'scripts'
     with RefreshRecovery(basic_information, scripts, python, root, timeout, MAIN) as recovery:
         work = recovery.work
@@ -407,14 +428,15 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
                           and aliases.get(row_name) is None))}
         first_version = read_document_version(work) if inserted and FIRST_SEEN_COLUMN in state[0] else None
         handoff = publish(database, state, inserted, changes, output, first_version=first_version,
-                          promotions=promotions, aliases=aliases, ready=ready, inherited=inherited)
+                          promotions=promotions, aliases=aliases, ready=ready, inherited=inherited,
+                          added_apis=added_apis)
         recovery.complete(results)
     return {'status': 'DATABASE_REFRESHED', 'documented': len(doc_names), 'checked': len(required),
             'added': len(inserted), 'promoted': len(promotions),
             'aliases': sum(target is not None for target in aliases.values()),
             'api_deleted': sum(value == 'API删除，待下线' for value in changes.values()),
             'documentation_deleted': sum(value == '文档删除，待下线' for value in changes.values()),
-            'handoff_count': len(handoff), 'new_apis': str(output)}
+            'handoff_count': len(handoff), 'new_apis': str(output), 'added_apis': str(added_apis)}
 
 
 def main():

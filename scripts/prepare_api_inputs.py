@@ -49,13 +49,27 @@ def merge_requirements(defaults, required, config):
     return ('\n'.join(lines)+'\n').encode('utf-8')
 
 
+def read_chip_type(npu_smi_output):
+    """Read device names from NPU summary rows, without a configured fallback."""
+    names = re.findall(r'^\s*\|\s*\d+\s+((?:Ascend\s*)?\d{3}[A-Za-z0-9_-]*)\s*\|',
+                       npu_smi_output, re.M | re.I)
+    chips = {'Ascend' + re.sub(r'^Ascend\s*', '', name, flags=re.I).upper()
+             for name in names}
+    if not chips:
+        raise ValueError('npu-smi info did not report a chip model in the NPU Name rows')
+    if len(chips) != 1:
+        raise ValueError('Multiple chip models reported by npu-smi info: ' + ', '.join(sorted(chips)))
+    return chips.pop()
+
+
 def collect_runtime_environment():
-    """Read the real driver and active CANN installation before publishing inputs."""
+    """Read the real chip, driver and active CANN installation before publishing inputs."""
     result = subprocess.run(['npu-smi', 'info'], capture_output=True, text=True,
                             encoding='utf-8', errors='replace', check=True, timeout=30)
     match = re.search(r'\bnpu-smi[^\n]*\bVersion:\s*([^\s|]+)', result.stdout)
     if not match:
         raise ValueError('npu-smi info did not report the driver Version')
+    chip_type = read_chip_type(result.stdout)
     roots = [Path(value) for value in (os.environ.get('ASCEND_HOME_PATH'),
              os.environ.get('ASCEND_TOOLKIT_HOME'), '/usr/local/Ascend/cann',
              '/usr/local/Ascend/ascend-toolkit/latest') if value]
@@ -69,14 +83,16 @@ def collect_runtime_environment():
                 continue
             version = re.search(r'^version\s*=\s*([^\s]+)', path.read_text(encoding='utf-8'), re.M | re.I)
             if version:
-                return {'driver_version':match[1], 'cann_version':version[1],
+                return {'chip_type':chip_type, 'driver_version':match[1], 'cann_version':version[1],
                         'npu_smi_output':result.stdout, 'cann_version_file':path}
     raise ValueError('Cannot read the active CANN toolkit version; no task inputs were published')
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--api', required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--api', nargs='+', help='One or more API names, in request order')
+    inputs.add_argument('--new-apis', action='store_true', help='Adapt APIs newly inserted during this run')
     parser.add_argument('--run-dir', required=True, type=Path)
     parser.add_argument('--defaults', type=Path, default=ROOT/'api-defaults.json')
     parser.add_argument('--requirement', action='append', default=[],
@@ -86,15 +102,17 @@ def main(argv=None):
     parser.add_argument('--dry-run', action='store_true', help='Show initial JSON without creating files or accessing the network')
     args = parser.parse_args(argv)
     try:
-        if not re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+', args.api, re.ASCII):
-            raise ValueError('--api must be one dotted API name')
+        for name in args.api or []:
+            if not re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*', name, re.ASCII):
+                raise ValueError('Invalid --api name: ' + name)
+        first_api = args.api[0] if args.api else 'new'
         run_dir = args.run_dir.resolve()
         parent = (DATA/'run_data').resolve()
         if run_dir == parent or not run_dir.is_relative_to(parent):
             raise ValueError('run-dir must be a task directory under AI_LOOP/data/run_data')
-        match = re.fullmatch(re.escape('adapt-'+args.api+'-')+r'(\d{6})', run_dir.name)
+        match = re.fullmatch(re.escape('adapt-'+first_api+'-')+r'(\d{6})', run_dir.name)
         if not match:
-            raise ValueError('API run-id must be adapt-<API>-<YYMMDD>')
+            raise ValueError('API run-id must be adapt-<first API or new>-<YYMMDD>')
         datetime.strptime(match[1], '%y%m%d')
         config = json.loads(args.defaults.read_text(encoding='utf-8'))
         for key in ENVIRONMENT:
@@ -112,9 +130,13 @@ def main(argv=None):
         requirements_source = ROOT/'requirements-default.txt'
         requirements_content = merge_requirements(requirements_source.read_bytes(), args.requirement, config)
         runtime = collect_runtime_environment()
+        if args.chip_type is not None and args.chip_type != runtime['chip_type']:
+            raise ValueError('--chip-type does not match detected hardware: ' + runtime['chip_type'])
+        config['chip_type'] = runtime['chip_type']
         record_path = run_dir/'log/step0-preparation.json'
         basic = {'run_id':run_dir.name,
-                 'problem-description':f'API `{args.api}` needs adaptation',
+                  'problem-description':('New API needs adaptation' if args.new_apis else
+                                         'API ' + ' '.join(f'`{name}`' for name in args.api) + ' needs adaptation'),
                  'cann_version':runtime['cann_version'], 'driver_version':runtime['driver_version'],
                  **{k:config[k] for k in ENVIRONMENT},
                  'preparation_status':'BASIC_READY', 'environment_status':'NOT_READY', 'preparation_config':snapshot,
@@ -128,7 +150,7 @@ def main(argv=None):
             requirements.write_bytes(requirements_content)
             npu_log = run_dir/'log/npu-smi-info.log'
             npu_log.write_text(runtime['npu_smi_output'], encoding='utf-8')
-            write_json(record_path, {'status':'BASIC_READY', 'api':args.api,
+            write_json(record_path, {'status':'BASIC_READY', 'apis':args.api or [], 'new_apis':args.new_apis,
                        'npu_smi_log':relative_path(npu_log, ROOT),
                        'cann_version_file':relative_path(runtime['cann_version_file'], ROOT),
                        'defaults_path':relative_path(args.defaults, ROOT), 'defaults_sha256':sha256(args.defaults),

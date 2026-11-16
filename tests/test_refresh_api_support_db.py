@@ -72,6 +72,7 @@ class RefreshTests(unittest.TestCase):
         with sqlite3.connect(self.database) as conn:
             conn.execute(SCHEMA)
         self.output = self.task / 'api-refresh/new-apis.json'
+        self.added_output = self.task / 'api-refresh/added-apis.json'
         self.checked = []
         self.working_directories = []
 
@@ -126,7 +127,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(list(self.root.rglob('*initial.sqlite3')), [])
         if self.output.parent.exists():
             self.assertEqual({p.name for p in self.output.parent.iterdir()},
-                             {'new-apis.json'} if self.output.exists() else set())
+                             {p.name for p in (self.output, self.added_output) if p.exists()})
 
     def test_full_database_update_and_exact_minimal_handoff(self):
         self.insert('torch.stay')
@@ -155,6 +156,40 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(after['torch.new_api']['分类待审核'], '是')
         self.assertIsNone(after['torch.new_api']['API适配分类'])
         self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api'])
+        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.new_api', 'torch.not_yet_built'])
+        self.assert_clean()
+
+    def test_actual_added_names_survive_same_run_retry_and_include_later_insertions(self):
+        self.run_refresh({'torch.new_api'})
+        self.run_refresh({'torch.new_api', 'torch.stay'})
+        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.new_api', 'torch.stay'])
+        self.run_refresh({'torch.new_api', 'torch.stay'})
+        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.new_api', 'torch.stay'])
+        self.assert_clean()
+
+    def test_new_run_does_not_select_previous_insertions_from_same_release(self):
+        self.run_refresh({'torch.new_api'})
+        original_added = self.added_output.read_bytes()
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "api首次出现版本" TEXT DEFAULT "2.16"')
+        later = self.task.parent / 'adapt-new-261110'
+        later.mkdir()
+        basic = later / 'basic_information.json'
+        basic.write_text(json.dumps({'venv':'data/venv/fixture', 'pytorch_version':'2.16.0a0'}))
+        result = refresh.refresh(basic, self.database, root=self.root,
+                                 extractor=lambda work: {'torch.new_api'}, checker=self.checker)
+        self.assertEqual(result['added'], 0)
+        self.assertEqual(json.loads((later/'api-refresh/added-apis.json').read_text()), [])
+        self.assertEqual(self.added_output.read_bytes(), original_added)
+
+    def test_promoted_and_restored_names_are_not_actual_insertions(self):
+        self.insert('torch.new_api', public='否')
+        self.insert('torch.stay', status='API删除，待下线')
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('UPDATE "API支持数据" SET "细分场景"=NULL')
+        self.run_refresh({'torch.new_api', 'torch.stay'})
+        self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api', 'torch.stay'])
+        self.assertEqual(json.loads(self.added_output.read_text()), [])
         self.assert_clean()
 
     def test_document_removed_but_present_in_wheel_stays_in_handoff(self):
@@ -310,6 +345,7 @@ class RefreshTests(unittest.TestCase):
         for column in ['是否支持', '分类', '细分模块', '细分场景', '适配策略', '本地是否适配']:
             self.assertEqual(rows['torch.a'][column], before[column])
         self.assertEqual(json.loads(self.output.read_text()), [])
+        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.a'])
 
     def test_same_length_uses_name_order_and_alias_rows_are_retained(self):
         with (self.torch / '__init__.py').open('a') as stream:
@@ -491,13 +527,36 @@ cufft_plan_cache = Manager()
                 self.run_refresh({'torch.new_api'})
         self.assertEqual(self.rows(), before)
         self.assertFalse(self.output.exists())
+        self.assertFalse(self.added_output.exists())
+        self.assert_clean(completed=False)
+
+    def test_added_output_failure_restores_completion_queue_and_database(self):
+        self.insert('torch.docgone')
+        self.output.parent.mkdir()
+        self.output.write_text('[]\n')
+        self.added_output.write_text('[]\n')
+        old_output, old_added = self.output.read_bytes(), self.added_output.read_bytes()
+        before = self.rows()
+        replace = refresh.os.replace
+        def fail_added_only(source, destination):
+            if Path(destination).resolve() == self.added_output.resolve():
+                raise OSError('fixture added output unavailable')
+            return replace(source, destination)
+        with patch.object(refresh.os, 'replace', side_effect=fail_added_only):
+            with self.assertRaisesRegex(OSError, 'added output unavailable'):
+                self.run_refresh({'torch.new_api'})
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(self.output.read_bytes(), old_output)
+        self.assertEqual(self.added_output.read_bytes(), old_added)
         self.assert_clean(completed=False)
 
     def test_commit_failure_rolls_back_and_restores_existing_handoff(self):
         self.insert('torch.stay')
         self.output.parent.mkdir()
         self.output.write_text('["torch.stay"]\n')
+        self.added_output.write_text('["torch.stay"]\n')
         old_output = self.output.read_bytes()
+        old_added = self.added_output.read_bytes()
         before = self.rows()
         connect = sqlite3.connect
         class Connection:
@@ -511,6 +570,7 @@ cufft_plan_cache = Manager()
                 self.run_refresh({'torch.stay', 'torch.new_api'})
         self.assertEqual(self.rows(), before)
         self.assertEqual(self.output.read_bytes(), old_output)
+        self.assertEqual(self.added_output.read_bytes(), old_added)
         self.assert_clean(completed=False)
 
     def cli(self, pages):

@@ -54,6 +54,7 @@ class PreparationTests(unittest.TestCase):
         self.patch_root.start()
         self.patch_data.start()
         self.patch_runtime = patch.object(prepare, 'collect_runtime_environment', return_value={
+            'chip_type':'Ascend910B4',
             'driver_version':'26.1.1', 'cann_version':'9.2.0',
             'npu_smi_output':'| npu-smi 26.1.1 Version: 26.1.1 |\n',
             'cann_version_file':self.root/'cann-version.info'})
@@ -68,6 +69,10 @@ class PreparationTests(unittest.TestCase):
         self.default_requirements=b'# fixture defaults\nnumpy==1.26.4\npytest==8.4.2\n'
         (self.root/'requirements-default.txt').write_bytes(self.default_requirements)
         self.config = dict(self.defaults)
+        # This fixture deliberately models the legacy single-bucket transport.
+        self.config['obs'] = self.defaults.get('pytorch_source_obs', self.defaults['obs'])
+        self.config.pop('pytorch_source_obs_prefix', None)
+        self.config.pop('pytorch_source_obs', None)
         self.config['obs_prefix'] = 'obs://fixture/7day-cache/'
         self.run_dir = self.data / 'run_data/adapt-torch.Tensor.add-261109'
         self.log = self.root / 'test.log'
@@ -183,8 +188,16 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'No complete'):
             self.select(self.listing((urls[0], mismatched)))
 
-    def test_unconfigured_chip_os_is_rejected(self):
-        self.config['chip_type'] = 'Ascend310P'
+    def test_wheel_profile_is_independent_of_chip_type(self):
+        expected = prepare.target_profile(self.config)
+        for chip in ('Ascend910B2', 'Ascend910B4', 'Ascend310P'):
+            with self.subTest(chip=chip):
+                self.config['chip_type'] = chip
+                self.assertEqual(prepare.target_profile(self.config), expected)
+                self.assertEqual(wheel_fetch.target_profile(self.config), expected)
+
+    def test_unconfigured_os_is_rejected(self):
+        self.config['os'] = 'unconfigured-os'
         with self.assertRaisesRegex(ValueError, 'No unique wheel profile'):
             prepare.target_profile(self.config)
 

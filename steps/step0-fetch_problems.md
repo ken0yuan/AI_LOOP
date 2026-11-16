@@ -2,29 +2,47 @@
 
 ## 输入内容
 
-API名, 或xxx
+一组API名, 或适配最新API
 
 ## 获取问题和各自需要的信息
 
-### 当输入为一个单独的API时
+### 当输入为适配API时
 
-单API任务的`problem-description`固定为``API `<API>` needs adaptation``。Step 0先调用脚本准备材料与环境。
+明确API任务的`problem-description`固定为``API `<API1>` `<API2>` …… needs adaptation``。如果输入为适配最新API的表述，`problem-description`固定为``New API needs adaptation``。Step 0先调用脚本准备材料与环境。
 
-从AI_LOOP根目录执行，单个API适配任务的`<run-id>`命名为`adapt-<API>-<年月日>`；`<API>`使用完整API名称，日期采用`YYMMDD`，例如`adapt-torch.Tensor.add-261109`：
+从AI_LOOP根目录执行，API适配任务的`<run-id>`命名为`adapt-<API1>-<年月日>`；`<API1>`使用第一个要适配的API完整名称，或者为`new`表示是适配最新API，日期采用`YYMMDD`，例如`adapt-torch.Tensor.add-261109`：
 
 ```bash
-python3 -B scripts/prepare_api_inputs.py --api <API> --run-dir data/run_data/<run-id>
+python3 -B scripts/prepare_api_inputs.py --api <API1> <API2> ... --run-dir data/run_data/<run-id>
+```
+
+`--api`接收一个或多个API，不限制数量。适配最新API时改用`--new-apis`，两种输入方式二选一：
+
+```bash
+python3 -B scripts/prepare_api_inputs.py --new-apis --run-dir data/run_data/adapt-new-<年月日>
 ```
 
 这个脚本只负责生成基础信息的初始部分: 在run-id目录下创建`basic_information.json`和`requirements.txt`。
 
-它先执行`npu-smi info`并读取当前CANN安装记录，再将`run_id`、`problem-description`、实际CANN和驱动版本，以及默认配置中的Python版本、目标芯片、系统和架构写入`data/run_data/<run-id>/basic_information.json`；后续需要的源码仓库和OBS配置保存在该文件的`preparation_config`中。
+它先执行`npu-smi info`读取真实芯片型号和驱动版本，并读取当前CANN安装记录，再将任务信息、实际硬件信息及默认配置中的Python版本、系统和架构写入`data/run_data/<run-id>/basic_information.json`。芯片型号不参与安装包筛选；后续源码和下载配置保存在`preparation_config`条目中。
 
 此时`preparation_status`为`BASIC_READY`，源码和wheel字段尚未填写。随后将根目录`requirements-default.txt`与`--requirement`指定的必须依赖合并，同名包采用任务指定的约束，将结果写入`data/run_data/<run-id>/requirements.txt`；没有指定必须依赖时，完整复制默认清单。这个阶段不拉取源码，也不查询或下载wheel。
 
 ### 当输入为 PR 链接时
 
 ## 准备安装包和源码
+
+按本次任务配置准备配套的安装包和源码。
+
+已有环境需要检查更新时，先执行以下命令。它只查询可用 nightly，不修改当前环境：
+
+```bash
+python3 -B scripts/check_nightly_availability.py \
+  --basic-information data/run_data/<run-id>/basic_information.json \
+  --output data/run_data/<run-id>/log/nightly-availability.json
+```
+
+根据检查结果决定更新或复用环境；检查失败时先处理原因。首次准备环境直接执行下方步骤。
 
 得到基础信息后，将`data/run_data/<run-id>/basic_information.json`传给`scripts/fetch_nightly_wheels.py`，一次完成安装包下载、源码准备和TorchNPU版本切换：
 
@@ -73,7 +91,7 @@ python3 -B scripts/install_env.py --run-dir data/run_data/<run-id>
 ```text
 AI_LOOP/
   requirements-default.txt                   全局默认依赖，由 AI_LOOP 维护
-  api-defaults.json                          单 API 任务默认环境与源码/下载配置
+  api-defaults.json                          API任务默认环境与源码/下载配置
   data/
     source_code/                             共享 PyTorch / torch-npu 源码缓存
     wheels/                                  共享框架 wheel 缓存
@@ -94,11 +112,12 @@ UTF-8 JSON对象，由准备、源码、wheel和安装脚本依次补写。初�
 
 | 字段 | 内容 |
 |---|---|
-| `run_id` | API任务为`adapt-<API>-<年月日>`，日期采用`YYMMDD` |
-| `problem-description` | API任务固定为``API `<API>` needs adaptation`` |
+| `run_id` | API任务为`adapt-<API1>-<年月日>`；最新API任务为`adapt-new-<年月日>`，日期采用`YYMMDD` |
+| `problem-description` | 明确API为``API `<API1>` `<API2>` …… needs adaptation``；最新API为`New API needs adaptation` |
 | `cann_version`、`driver_version` | 准备脚本在初始阶段采集当前服务器的CANN和驱动版本；驱动来自`npu-smi info`，CANN来自当前安装记录 |
 | `python_version` | 完整Python版本，如`3.11.17` |
-| `chip_type`、`os`、`architecture` | 本任务的目标芯片、系统和架构，用于选择配套wheel |
+| `chip_type` | 从`npu-smi info`读取的真实芯片型号，如`Ascend910B4`；不参与安装包筛选 |
+| `os`、`architecture` | 本任务的系统和架构，用于选择配套wheel |
 | `pytorch_source` | 固定为`data/source_code/pytorch`，内容来自与所选wheel配套的源码包 |
 | `pytorch_source_commit` | PyTorch源码包OBS对象名中的提交前缀，不冒充最新主线提交 |
 | `torch_npu_latest_source` | 固定为`data/source_code/torch_npu`，准备仓库后在同一目录切换到本次wheel对应提交 |
@@ -127,7 +146,7 @@ PyTorch和torch-npu使用`basic_information.json`中指定的wheel安装，依�
 
 ### 3. pr_info.json（按需）
 
-有关联 PR 且取得真实信息时提供，记录 PR 号、仓库/链接、标题、提交等已有事实。单 API 或没有关联 PR 的 CI 任务可以不提供；不要为凑齐文件伪造 PR。
+上游合入的有关联 PR 且取得真实信息时提供，记录 PR 号、仓库/链接、标题、提交等已有事实。API适配或没有关联 PR 的 CI 任务可以不提供；不要为凑齐文件伪造 PR。
 
 ### 4. pr_diff.diff（按需）
 
@@ -139,7 +158,7 @@ PyTorch和torch-npu使用`basic_information.json`中指定的wheel安装，依�
 
 ### 按输入来源生成的文件
 
-- 单 API：至少 basic_information + requirements；API 名及需求放基础信息。
+- API适配：至少 basic_information + requirements；API名称或最新API需求放基础信息。
 - PR：上述两份，加实际取得的 pr_info / pr_diff；有测试结果时再附 CI_result。
 - CI：上述两份，加已有 CI_result；有关联 PR 时可同时提供 PR 材料。
 

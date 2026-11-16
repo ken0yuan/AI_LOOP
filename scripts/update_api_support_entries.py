@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fill missing API fields from eleven-column JSONL and current-run reasons."""
+"""Fill missing API fields from eleven-column JSONL and shared classification reasons."""
 from __future__ import annotations
 
 import argparse
@@ -102,7 +102,7 @@ def save_evidence(records, definitions, *, basic_information, root=ROOT):
     temporary = None
     try:
         conn.execute('BEGIN IMMEDIATE')
-        path = resolve(basic_information, root).parent / 'api-classification/classification-evidence.jsonl'
+        path = root / 'data/api-classification/classification-evidence.jsonl'
         existing, existing_definitions = classification_evidence(path)
         # Reuse the reader's validation before publishing any update.
         names = []
@@ -219,7 +219,7 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
     by_name = {r['API名称']: r for r in records}
     require(len(by_name) == len(records) and set(by_name) <= set(names),
             'Entries must use unique exact names from new-apis.json')
-    evidence_path = task / 'api-classification/classification-evidence.jsonl'
+    evidence_path = root / 'data/api-classification/classification-evidence.jsonl'
     reasons, definitions = classification_evidence(evidence_path)
     proposals = list(definitions.values())
     database = resolve(database or 'data/api-support.sqlite3', root)

@@ -1,14 +1,14 @@
 {
   "python_version": "3.11.17",
-  "chip_type": "Ascend910B2",
+  "chip_type": "auto",
   "os": "ubuntu22.04",
   "architecture": "aarch64",
   "pytorch_repo": "https://github.com/pytorch/pytorch.git",
   "torch_npu_repo": "https://gitcode.com/Ascend/pytorch.git",
-  "obs_prefix": "obs://pytorch-ci-cache/7day-cache/",
+  "obs_prefix": "obs://pytorch-torchnpu/7day-cache/",
+  "pytorch_source_obs_prefix": "obs://pytorch-ci-cache/7day-cache/",
   "wheel_profiles": [
     {
-      "chip_type": "Ascend910B2",
       "os": "ubuntu22.04",
       "architecture": "aarch64",
       "glibc": "2.35",
@@ -18,6 +18,13 @@
     }
   ],
   "obs": {
+    "bucket": "pytorch-torchnpu",
+    "downloader": {
+      "type": "public-obs",
+      "endpoint": "https://obs.cn-southwest-2.myhuaweicloud.com"
+    }
+  },
+  "pytorch_source_obs": {
     "bucket": "pytorch-ci-cache",
     "downloader": {
       "type": "obsutil",

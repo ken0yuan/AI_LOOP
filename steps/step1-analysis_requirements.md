@@ -8,8 +8,9 @@
 
 | 问题描述 | 处理条目 |
 |---|---|
-| ``API `<API>` needs adaptation``，例如``API `torch.Tensor.add` needs adaptation`` | [API 适配](#api-适配) |
+| ``API `<API1>` `<API2>` …… needs adaptation``，一个或多个API，例如``API `torch.Tensor.add` `torch.abs` needs adaptation`` | [API 适配](#api-适配) |
+| ``New API needs adaptation`` | [API 适配](#api-适配) |
 
 ## API 适配
 
-进入[Step 2.1：API 适配前置准备](step2.1-api_prepare.md)，将本次`data/run_data/<run-id>/basic_information.json`和从问题描述中提取的完整API名称作为输入，按该子流程继续处理。
+进入[Step 2.1：API 适配前置准备](step2.1-api_prepare.md)，将本次`data/run_data/<run-id>/basic_information.json`输入，按流程继续处理。

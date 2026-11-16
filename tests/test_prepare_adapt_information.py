@@ -66,6 +66,95 @@ class AdaptInformationTests(unittest.TestCase):
         self.run_prepare()
         self.assertEqual(json.loads(self.output.read_text(encoding='utf-8'))['task-branches'], ['adapt-Tensor.add'])
 
+    def test_step_zero_batch_keeps_order_and_reports_each_unknown_name(self):
+        self.description('API `torch.nn.functional.relu` `torch.Tensor.add` needs adaptation')
+        self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_text())['task-branches'],
+                         ['adapt-torch.nn.functional.relu', 'adapt-Tensor.add'])
+        before = self.output.read_bytes()
+        for unknown in ('Optimizer.missing', 'missing'):
+            with self.subTest(unknown=unknown):
+                self.description(f'API `torch.Tensor.add` `{unknown}` needs adaptation')
+                with self.assertRaisesRegex(ValueError, unknown):
+                    self.run_prepare()
+                self.assertEqual(self.output.read_bytes(), before)
+
+    def latest(self, names=()):
+        self.basic.write_text(json.dumps({'problem-description':'New API needs adaptation',
+                                         'pytorch_version':'2.16.0a0+gitfixture'}))
+        path = self.task/'api-refresh/added-apis.json'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(list(names)))
+
+    def test_latest_uses_only_actual_additions_and_existing_api_filters(self):
+        self.latest(['torch.new_alias','torch.new_docgone','torch.new_public',
+                     'torch.new_offline','torch.new_internal','torch.new_done','torch.new_disabled'])
+        with self.connection() as conn:
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "api首次出现版本" TEXT')
+            # All old rows share the current version; none are new task candidates.
+            conn.execute('UPDATE "API支持数据" SET "api首次出现版本"=?', ('2.16',))
+            conn.executemany('INSERT INTO "API支持数据" '
+                             '("API名称","本地是否适配","是否对外","是否支持",'
+                             '"API真正名字","适配策略","api首次出现版本") VALUES (?,?,?,?,?,?,?)', [
+                ('torch.new_alias',None,'是','未提供','Tensor.add',None,'2.16'),
+                ('torch.new_public','是','是','未提供',None,'补充testcase','2.16'),
+                ('torch.new_docgone','是','是','文档删除，待下线',None,'补充testcase','2.16'),
+                ('torch.new_offline','是','是','API删除，待下线',None,'补充testcase','2.16'),
+                ('torch.new_internal','是','否','支持',None,'补充testcase','2.16'),
+                ('torch.new_done','是','是','支持',None,'已支持','2.16'),
+                ('torch.new_disabled','否','是','未提供',None,'补充testcase','2.16')])
+        mapping = self.root/'data/branch-mapping.json'
+        mapping.write_text(json.dumps({'adapt-torch.new_alias':'existing-work'}))
+        # The completion queue is intentionally empty: it is not the task source.
+        queue = self.task/'api-refresh/new-apis.json'
+        queue.write_text('[]')
+        before_db, before_mapping = self.database.read_bytes(), mapping.read_bytes()
+        result = self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_text())['task-branches'],
+                         ['adapt-torch.new_alias', 'adapt-torch.new_docgone', 'adapt-torch.new_public'])
+        self.assertEqual(result['resolved_apis']['torch.new_alias'], 'Tensor.add')
+        self.assertEqual(set(result['skipped_apis']),
+                         {'torch.new_offline','torch.new_internal','torch.new_done','torch.new_disabled'})
+        first = self.output.read_bytes()
+        self.run_prepare()
+        self.assertEqual(self.output.read_bytes(), first)
+        self.assertEqual(self.database.read_bytes(), before_db)
+        self.assertEqual(mapping.read_bytes(), before_mapping)
+
+    def test_latest_no_actual_additions_stops_and_clears_stale_dispatch(self):
+        self.latest()
+        with self.connection() as conn:
+            conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "api首次出现版本" TEXT')
+            conn.execute('UPDATE "API支持数据" SET "api首次出现版本"=?', ('2.16',))
+        self.assertEqual(self.run_prepare()['status'], 'NO_ADAPTATION_REQUIRED')
+        self.assertFalse(self.output.exists())
+        self.output.write_text(json.dumps({'task-branches':['adapt-view'],
+                                          'adapt-plan':{'old':'plan'}, 'dispatcher':{'old':'dispatch'},
+                                          'api-status':{'view':'支持'}, 'other':'keep'}))
+        self.assertEqual(self.run_prepare()['status'], 'NO_ADAPTATION_REQUIRED')
+        self.assertEqual(json.loads(self.output.read_text()), {'task-branches':[], 'other':'keep'})
+
+    def test_latest_missing_or_invalid_handoff_preserves_existing_output(self):
+        self.description('New API needs adaptation')
+        self.output.write_text('{"task-branches":["adapt-view"]}')
+        before = self.output.read_bytes()
+        with self.assertRaises(FileNotFoundError):
+            self.run_prepare()
+        self.latest()
+        path = self.task/'api-refresh/added-apis.json'
+        for value in ({'apis':[]}, ['torch.missing'], [None]):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    self.run_prepare()
+                self.assertEqual(self.output.read_bytes(), before)
+
+    def test_latest_handoff_does_not_require_a_version_column_or_wheel_version(self):
+        self.latest(['Tensor.add'])
+        self.description('New API needs adaptation')
+        self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_text())['task-branches'], ['adapt-Tensor.add'])
+
     def test_shorter_representative_reuses_existing_task_and_checkpoint(self):
         with self.connection() as conn:
             conn.executemany('INSERT INTO "API支持数据" '
