@@ -1,71 +1,76 @@
-# Step 4.1：根据问题材料填写模板并提交 issue
+# Step 4.1：创建或复用 issue
 
-接收前序 agent 或用户交付的问题及分析材料，整理到 issue 模板后，再创建或复用主仓 issue。AI_LOOP 中由主 agent 在开发前执行，成功后返回 [Step 4](step4-subagent_development.md)；本步不代做问题分析、方案开发或测试。
+在开发前整理问题材料，创建或复用目标主仓的 issue，完成后交回 Step4。
 
-本步只完成“问题进入开发”的交接，后续仍需代码生成、实测和失败修复，参见 [PR #49212 的完整闭环参考](../references/success-case-49212.md)。issue 创建成功不能当作本批适配完成。
+## 输入交付件
 
-## 输入：接收材料，而不是自行构造问题
+`RUN_DIR` 为 `AI_LOOP/data/run_data/<run-id>/`，下列 JSON 文件均位于该目录。
 
-调用方传入以下信息，使用现有交接内容即可，不要求新建一种 JSON 格式：
+| 前序步骤 | 字段 | 用途 |
+|---|---|---|
+| Step0 | `basic_information.json.problem-description` | 问题描述与任务目标 |
+| Step0 | `basic_information.json.torch_npu_latest_source` | 源码仓路径，读取贡献要求 |
+| Step0 | `basic_information.json.preparation_config.torch_npu_repo` | 接收 issue 的主仓 |
+| Step0 | `basic_information.json.chip_type` | 已记录的设备型号 |
+| Step0 | `basic_information.json.pytorch_version` | 已准备的 PyTorch 版本 |
+| Step0 | `basic_information.json.torch_npu_version` | 已准备的 torch-npu 版本 |
+| Step3.1 | `adapt-information.json.adapt-plan.step1.agentname` | 选择对应任务的模板 |
+| Step3.1 | `adapt-information.json.adapt-plan.step1.task-branches[]` | 本次处理对象 |
+| 本步续跑 | `issue.json.repository` | 已有 issue 所在仓库 |
+| 本步续跑 | `issue.json.number` | 已有 issue 编号 |
 
-| 输入 | 说明 |
+### `api-adaptation` 的策略输入
+
+将 `task-branches[]` 每项去掉 `adapt-` 前缀，得到 API 名称；从 Step2.1 维护的 `AI_LOOP/data/api-support.sqlite3` 读取：
+
+| 字段 | 用途 |
 |---|---|
-| 问题材料 | 问题描述、需求说明、问题分析；可合并在单独一份文件，也可明确列出多份文件，文件名不固定 |
-| 补充证据 | 如有，提供复现脚本、已有失败日志、环境记录、影响分析、方案和验收要求的位置 |
-| 批次上下文 | AI_LOOP 中提供根目录及本次 `data/run_data/<run-id>/`，按需读取基础信息和适配计划；独立调用不强制具有这些文件 |
-| 发布上下文 | 目标主仓、结果目录、已有 issue 记录或链接；可从本批源码的 `upstream` 核实目标仓 |
-| 模板与规范 | 用户指定模板；未指定时检查目标仓的 issue 模板及贡献要求，再选下述默认模板 |
+| `API支持数据.API名称` | 匹配本次 API |
+| `API支持数据.适配策略` | 确定本次任务目标和验证计划 |
 
-明确传入的材料文件是主要内容来源，运行目录是补充。必须读取实际文件及其必要引用，不能只根据文件名、一个 API 名、`adapt-plan` 或分支名推测问题。单份文件包含多个主题时直接按内容提取，无需上游拆分或改名。
+## 1. 选择模板并保存草稿
 
-相对路径按调用方给定基准解析；AI_LOOP 中以技能根目录为基准。路径不清楚、文件不可读或不属于本批时，先定位正确材料。沿用前置流程的停止条件，不通过本步绕过前置失败或停止状态。
+1. 按 `agentname` 选择对应的 issue 模板。
+   1. `api-adaptation` 使用 [templates/issue-template.md](../templates/issue-template.md)。
+   2. 其他任务未配置模板或对应文件不存在时，也使用该默认模板；默认模板缺失时交回缺失路径。
+2. 按模板填写标题和正文，在 `RUN_DIR` 中以 UTF-8 保存为 `issue-title.txt`、`issue-body.md`。
+3. 核对标题为非空单行、任务范围与输入一致，清除占位符和填写提示。
 
-## 1. 选择模板并提取内容
+用户只要草稿时，交付两份文件并结束。材料不足时，交回草稿及缺项；要求发布且核对通过时，继续下节。
 
-模板优先级：用户指定模板 → 目标仓适用的 issue 模板 → [默认 issue 模板](../templates/issue-template.md)。使用仓库模板时保留其必填栏目，按实际材料补足分析与验证计划，不强行替换仓库格式。
+## 2. 查重并发布
 
-| 模板内容 | 从哪里填入 |
+在 AI_LOOP 根目录调用 `scripts/publish_issue.py`，沿用同一 `RUN_DIR`。
+
+1. 已有 `issue.json` 时，按其中的仓库和编号查询；已有交接链接时传入 `--issue-url`。
+2. 未找到对应 issue 时，由 AI 根据标题及任务对象选择查询词，每词传一个 `--keyword`，搜索开放和已关闭的 issue。
+   1. API 任务逐个用完整 API 名称查询。
+3. 读取返回的标题、正文和状态，核对是否为目标主仓中同一问题、对象和验收目标，再决定复用或创建。
+
+| 操作 | 命令 |
 |---|---|
-| 问题概述、实际与预期行为 | 原始问题或需求说明，保留具体触发条件和差异 |
-| 环境与复现 | 上游环境记录、脚本、命令、已有日志；没有复现证据则明确说明 |
-| 分析与影响范围 | 前序分析报告，区分已确认事实、推断和待确认结论 |
-| 建议方案与处理范围 | 已交付方案或适配计划，标为拟采用方案，不写成已实现 |
-| 验收标准与验证计划 | 已交付验收条件及待执行检查，保留“计划”状态 |
+| 按已有记录查询 | `python3 -B scripts/publish_issue.py search --run-dir "$RUN_DIR"` |
+| 按交接链接查询 | `python3 -B scripts/publish_issue.py search --run-dir "$RUN_DIR" --issue-url "$ISSUE_URL"` |
+| 按 AI 选择的关键词查询 | `python3 -B scripts/publish_issue.py search --run-dir "$RUN_DIR" --keyword "$QUERY"` |
+| 复用相同问题 | `python3 -B scripts/publish_issue.py reuse --run-dir "$RUN_DIR" --number "$NUMBER"` |
+| 确认没有相同问题后创建 | `python3 -B scripts/publish_issue.py create --run-dir "$RUN_DIR"` |
 
-在本地保留关键结论的来源对照，如文件及具体章节或日志，可写入已有运行记录，不强制另建固定格式文件。对外正文只公开必要内容，不暴露服务器路径、内部单据、认证信息或整份内部交接材料。
+查询返回 `status=searched`、`issues[]`；每条含 `number`、`title`、`body`、`state`、`html_url`。查询词和搜索结果可分次累积，判断由 AI 完成。仅在已获授权用草稿替换已有正文时，给 `reuse` 加 `--update-body`。
 
-## 2. 填写模板，处理缺项与冲突
+发布返回 `searched` 时重新比对；`pending` 时回查原操作，避免重复创建；`error` 时按错误处理。查询失败或无法判断是否同一问题时，保留草稿及查到的编号，不创建新 issue。
 
-复制所选模板，按材料填写，生成 UTF-8 的 `issue-body.md` 和概括真实问题的标题。不能把空模板、填写提示或“验证创建 issue”的描述当成业务任务正文。
+## 输出交付件
 
-必须有可识别的问题或需求及明确的预期结果；缺少这些核心材料时保存草稿，列出缺项并返回调用方补充，不提交。缺少根因或暂未复现不自动阻止记录真实问题，按实际写“待确认”“未复现”或“未提供”。需求类问题的复现栏可写“不适用”并说明原因。
+脚本创建、复用或更新后回读远端，保存最终正文到 `issue.json.body`。将 `issue.json.url` 交回 Step4，独立调用时交回调用方。
 
-现象、版本、范围或结论冲突且影响正文时，核查后交回澄清，不能擅自选择。不能把分析推断升级成确认结论，也不能把验证计划写成测试通过。
-
-提交前确认：关键栏目有实际内容；标题和正文对应同一问题；无未替换的模板占位符；结论状态符合材料；格式符合目标仓规范。仅要求草稿时到此交付。
-
-## 3. 查重并提交
-
-先回读已有 `issue.json` 或交接链接。没有记录时，用标题和稳定问题关键词搜索主仓的打开、关闭 issue，再读正文核对范围；不以内部 run-id 为唯一判据。同一问题复用原 issue，需要修改正文时在已授权范围内更新并回读，不另建记录绕过旧问题。
-
-示例中 `UPSTREAM_REPO` 是核实的主仓 `owner/repo`，`RUN_DIR` 是结果目录的绝对路径，`TITLE`、`KEYWORD` 来自填写的问题，`ISSUE_NUMBER` 来自真实响应。
-
-```bash
-gitcode auth status
-gitcode issue list -R "$UPSTREAM_REPO" --state all --search "$KEYWORD" --json
-gitcode issue create -R "$UPSTREAM_REPO" --title "$TITLE" \
-  --body-file "$RUN_DIR/issue-body.md" --dry-run --json
-gitcode issue create -R "$UPSTREAM_REPO" --title "$TITLE" \
-  --body-file "$RUN_DIR/issue-body.md" --json
-gitcode issue view "$ISSUE_NUMBER" -R "$UPSTREAM_REPO" --json
-```
-
-这些操作按状态选择，不是无条件连续运行的脚本：有匹配记录不再 create；仅预览不实际创建；每项成功后再继续。用户已要求创建时，材料及正文检查完成后直接提交。超时或响应不完整时先查远端实际状态，不重复创建。
-
-## 4. 输出与交接
-
-保留填好的 `issue-body.md`、本地来源对照及原始响应。回读核对仓库、标题、正文和问题范围后，保存 `issue.json`：`status`（`created` / `reused`）、`repository`、`number`、`url`；AI_LOOP 中另保留本次 `run-id`。编号和 URL 使用真实返回值。
-
-材料缺失、认证失败或未完成回读时，交回原因、草稿和所需材料，不标记完成。成功后把 issue 链接及问题材料位置交回 Step 4，供开发及 Step 4.2 使用；独立调用则交付调用方，不自行启动开发。
-
-CLI 参数、认证与响应问题按需阅读 [发布说明](../references/gitcode-cli-publishing.md)。
+| 文件或字段 | 内容 |
+|---|---|
+| `issue-title.txt` | 单行 issue 标题 |
+| `issue-body.md` | UTF-8 的 issue 草稿 |
+| `issue.json.status` | 本次创建或复用的结果 |
+| `issue.json.repository` | 接收 issue 的主仓 |
+| `issue.json.number` | 回读确认的 issue 编号 |
+| `issue.json.url` | 回读确认的 issue 链接 |
+| `issue.json.title` | 远端标题 |
+| `issue.json.body` | 远端最终正文，供 Step4.2 使用 |
+| `issue.json.run-id` | 本次运行目录名 |
