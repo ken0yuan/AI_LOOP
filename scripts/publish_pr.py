@@ -113,22 +113,24 @@ def find_pr(target, issue, known):
     expected = (upstream.lower(), base, fork.lower(), branch)
     endpoint = f"repos/{upstream}/issues/{int(issue.rsplit('/', 1)[1])}/pull_requests"
     linked = {int(p["number"]) for p in rows(json.loads(invoke("gitcode", "api", endpoint).stdout))}
+    known = int(known) if known else None
+    # A push to the same fork/ref also updates open PRs targeting another base.
+    listing = invoke("gitcode", "pr", "list", "-R", upstream, "--state", "all",
+                     "--head", branch, "--paginate", "--json")
+    listed = json.loads(listing.stdout)
     numbers = set(linked)
-    if known:
-        numbers.add(int(known))
-    if not known or not linked:
-        listing = invoke("gitcode", "pr", "list", "-R", upstream, "--state", "all",
-                         "--head", branch, "--base", base, "--paginate", "--json")
-        # GitCode CLI v0.16.0 emits JSON null for an empty paginated slice.
-        listed = json.loads(listing.stdout)
-        if listed is not None:
-            numbers.update(int(p["number"]) for p in rows(listed))
+    if listed is not None:
+        numbers.update(int(p["number"]) for p in rows(listed))
+    if known is not None:
+        numbers.add(known)
     matches = []
     for number in sorted(numbers):
         item = details(upstream, number)
-        if identity(item) != expected:
-            require(number not in linked and number != known,
-                    "The issue or the saved record already points to a different PR branch or repository.")
+        actual = identity(item)
+        if actual != expected:
+            require(number != known, "The saved PR belongs to a different branch or repository.")
+            require(actual[2:] != expected[2:] or item["state"] not in ("open", "opened"),
+                    "Another open PR uses the same fork branch. A push would also update it.")
             continue
         linked_in_text = issue_urls(item["body"])
         require(issue.lower() in linked_in_text or (number in linked and not linked_in_text),
@@ -266,14 +268,19 @@ def publish(args):
                 if other.parent == run:
                     continue
                 r = read(other)
-                require(str(r.get("issue-url", "")).rstrip("/").lower() != issue_url.lower(),
-                        f"This issue is already managed by run {other.parent.name}. Resume that run.")
+                if str(r.get("issue-url", "")).rstrip("/").lower() == issue_url.lower():
+                    require(r.get("fork") and r.get("head"),
+                            f"Cannot identify the fork branch managed by run {other.parent.name}.")
+                    require((r["fork"].lower(), r["head"]) != (fork.lower(), branch),
+                            f"This fork branch is already managed by run {other.parent.name}. Resume that run.")
         state = read(state_path) if state_path.exists() else {}
         record = read(record_path) if record_path.exists() else {}
         for prior in (state, record):
             if prior:
                 require(all(prior.get(k) == v for k, v in key.items()), "Publication identity changed. Inspect the existing record.")
         known = state.get("number") or record.get("number")
+        if state.get("number") and record.get("number"):
+            require(int(state["number"]) == int(record["number"]), "Saved PR numbers disagree.")
         if state.get("create_pending") and not state.get("create_rejection_http"):
             require(state.get("commit") == code, "Recover the previous create before publishing a different commit.")
         invoke("gitcode", "auth", "status")
@@ -322,7 +329,8 @@ def publish(args):
             require(pr, "Create result is uncertain. Run again to reconcile; a retry will not create a duplicate.")
         state.update(number=int(pr["number"]), create_pending=False)
         save(state_path, state)
-        require(pr["head"]["sha"] == code or details(upstream, pr["number"])["head"]["sha"] == code,
+        pr = find_pr(target, issue_url, state["number"])
+        require(pr and pr["head"]["sha"] == code,
                 "PR head has not reached the reviewed commit; retry after the platform updates.")
         if pr.get("title") != title or pr["body"].strip() != body.strip():
             invoke("gitcode", "pr", "edit", str(pr["number"]), "-R", upstream, "--title", title,
