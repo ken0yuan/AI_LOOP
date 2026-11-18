@@ -125,7 +125,8 @@ class DispatcherTests(unittest.TestCase):
         basic, _ = self.prepare(['adapt-view', 'adapt-Tensor.add'])
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for name in ['dispatch_adaptation_tasks.py', 'prepare_development_branch.py', 'preparation_state.py']:
+        for name in ['dispatch_adaptation_tasks.py', 'prepare_development_branch.py', 'preparation_state.py', 'branch_mapping.py',
+                         'refresh_api_support_db.py', 'api_refresh_runtime.py', 'api_first_seen.py']:
             (scripts / name).write_bytes((Path(dispatcher.__file__).parent / name).read_bytes())
         result = subprocess.run([sys.executable, '-B', str(scripts / 'dispatch_adaptation_tasks.py'),
                                  '--basic-information', str(basic),

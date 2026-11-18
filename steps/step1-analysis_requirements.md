@@ -8,7 +8,7 @@
 
 | 问题描述 | 处理条目 |
 |---|---|
-| ``API `<API1>` `<API2>` …… needs adaptation``，一个或多个API，例如``API `torch.Tensor.add` `torch.abs` needs adaptation`` | [API 适配](#api-适配) |
+| ``API `<API1>` `<API2>` …… needs adaptation``（前面可带 torch 版本号） | [API 适配](#api-适配)，按点名 API 查找：`requirements.txt` 固定了 `torch` 时查对应版本表，跳过 nightly 刷新；省略 `torch` 时查 nightly 主表 `API支持数据`。 |
 | ``New API needs adaptation`` | [API 适配](#api-适配) |
 
 ## API 适配

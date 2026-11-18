@@ -125,8 +125,50 @@ def task_config(basic):
     return config
 
 
-def state(basic):
-    sources = all(basic.get(k) for k in SOURCE_FIELDS)
+def fixed_torch_release(path, basic):
+    """Read active exact release pins, including included requirement/constraint files."""
+    from pip._internal.network.session import PipSession
+    from pip._internal.req.req_file import parse_requirements
+    from pip._vendor.packaging.markers import default_environment
+    from pip._vendor.packaging.requirements import Requirement, InvalidRequirement
+    from pip._vendor.packaging.version import Version
+    requirements = Path(path).parent/'requirements.txt'
+    if not requirements.is_file():
+        return None
+    env = default_environment()
+    full = basic['python_version']
+    env.update(python_full_version=full, python_version='.'.join(full.split('.')[:2]),
+               platform_machine=basic.get('architecture', env['platform_machine']))
+    pins = set()
+    specs = []
+    with PipSession() as session:
+        for entry in parse_requirements(str(requirements), session=session):
+            try:
+                req = Requirement(entry.requirement)
+            except InvalidRequirement:
+                continue
+            if req.name.lower() != 'torch' or req.marker and not req.marker.evaluate(env):
+                continue
+            specs.append(req.specifier)
+            for spec in req.specifier:
+                if spec.operator == '==' and '*' not in spec.version:
+                    version = Version(spec.version)
+                    if not version.is_prerelease:
+                        pins.add(version)
+    if len(pins) > 1 or (pins and not all(s.contains(next(iter(pins))) for s in specs)):
+        raise ValueError('Conflicting torch pins in requirements.txt')
+    return next(iter(pins), None)
+
+
+def require_nightly_task(path, basic):
+    if fixed_torch_release(path, basic) is not None:
+        raise ValueError('Fixed torch version: use scripts/prepare_fixed_wheels.py --basic-information '+str(path))
+
+
+def state(basic, *, fixed_release=False):
+    fields = (('pytorch_source', 'torch_npu_latest_source', 'torch_npu_main_commit', 'torch_npu_commit')
+              if fixed_release else SOURCE_FIELDS)
+    sources = all(basic.get(k) for k in fields)
     wheels = all(basic.get(k) for k in WHEEL_FIELDS)
     return 'INPUTS_READY' if sources and wheels else 'SOURCES_READY' if sources else 'WHEELS_READY' if wheels else 'BASIC_READY'
 
@@ -137,7 +179,7 @@ def publish(path, basic, updates, record_updates, *, root=None):
     updated.pop('api_names', None)
     updated = reset_environment(updated)
     updated = relative_metadata(updated, root)
-    updated['preparation_status'] = state(updated)
+    updated['preparation_status'] = state(updated, fixed_release=record_updates.get('wheel_source') == 'fixed-release')
     record_path = path.parent / 'log/step0-preparation.json'
     record = json.loads(record_path.read_text()) if record_path.exists() else {}
     record.update(record_updates)

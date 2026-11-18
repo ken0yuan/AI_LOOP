@@ -97,7 +97,7 @@ class EnvironmentResultTests(unittest.TestCase):
         self.assertEqual(self.invoke(),0,self.errors.getvalue())
         ready=json.loads(self.basic.read_text())
         self.assertEqual(ready['environment_status'],'ENV_READY')
-        self.assertTrue(ready['environment_reused'])
+        self.assertNotIn('environment_reused', ready)
         self.assertNotIn('environment_error',ready)
 
     def test_dry_run_does_not_modify_basic_information_or_create_environment(self):

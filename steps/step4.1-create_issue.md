@@ -12,6 +12,7 @@
 | Step0 | `basic_information.json.torch_npu_latest_source` | 源码仓路径，读取贡献要求 |
 | Step0 | `basic_information.json.preparation_config.torch_npu_repo` | 接收 issue 的主仓 |
 | Step0 | `basic_information.json.chip_type` | 已记录的设备型号 |
+| Step0 | `basic_information.json.venv` | 按 Step 4 的目录规则确定 API 适配目标及策略表 |
 | Step0 | `basic_information.json.pytorch_version` | 已准备的 PyTorch 版本 |
 | Step0 | `basic_information.json.torch_npu_version` | 已准备的 torch-npu 版本 |
 | Step3.1 | `adapt-information.json.adapt-plan.step1.agentname` | 选择对应任务的模板 |
@@ -21,12 +22,12 @@
 
 ### `api-adaptation` 的策略输入
 
-将 `task-branches[]` 每项去掉 `adapt-` 前缀，得到 API 名称；从 Step2.1 维护的 `AI_LOOP/data/api-support.sqlite3` 读取：
+将 `task-branches[]` 每项去掉 `adapt-` 前缀，按 [Step 4 的 venv 对照表](step4-subagent_development.md) 在 `AI_LOOP/data/api-support.sqlite3` 选择本次表。固定版本只读对应版本表；目标表或 API 缺失时交回具体缺项。
 
 | 字段 | 用途 |
 |---|---|
-| `API支持数据.API名称` | 匹配本次 API |
-| `API支持数据.适配策略` | 确定本次任务目标和验证计划 |
+| `API名称`、`API真正名字` | 在所选表匹配 API，别名定位到同表正名 |
+| 正名行的 `适配策略` | 确定本次任务目标和验证计划 |
 
 ## 1. 选择模板并保存草稿
 
@@ -44,8 +45,8 @@
 
 1. 已有 `issue.json` 时，按其中的仓库和编号查询；已有交接链接时传入 `--issue-url`。
 2. 未找到对应 issue 时，由 AI 根据标题及任务对象选择查询词，每词传一个 `--keyword`，搜索开放和已关闭的 issue。
-   1. API 任务逐个用完整 API 名称查询。
-3. 读取返回的标题、正文和状态，核对是否为目标主仓中同一问题、对象和验收目标，再决定复用或创建。
+   1. API 适配按目标 PyTorch 版本分开建 issue。用完整 API 名称搜索，逐条核对候选 issue 的目标版本。例如，同一个 API 的 nightly 任务和固定版本任务各用一个 issue；两个不同的主次版本也各用一个 issue。固定版本按主次版本查重，例如 `2.14.0+cpu` 的适配目标写作 `PyTorch 2.14`。
+3. 只有目标主仓、问题、处理对象和验收目标一致才复用；API 适配还要求候选 issue 专门跟踪本次目标版本。只有其他版本的 issue 时，为本次版本创建新 issue。旧 issue 未注明版本时先核对关联材料。
 
 | 操作 | 命令 |
 |---|---|

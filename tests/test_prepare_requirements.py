@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 import sys
 from pathlib import Path
@@ -43,6 +45,35 @@ class TaskRequirementsTests(unittest.TestCase):
         self.assertEqual((self.f.root/'requirements-default.txt').read_bytes(), self.f.default_requirements)
         record = json.loads((self.f.run_dir/'log/step0-preparation.json').read_text())
         self.assertEqual(record['requirements_sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_release_and_nightly_checks_use_the_published_version(self):
+        published = io.BytesIO(b'{"info":{"name":"torch","version":"2.14.0"}}')
+        with patch.object(prepare, 'urlopen', return_value=published) as get:
+            self.assertFalse(prepare.nightly_target('2.14'))
+            self.assertEqual([call.args[0].full_url for call in get.call_args_list],
+                             ['https://pypi.org/pypi/torch/2.14.0/json'])
+        for target in ('2.16', '2.13', '9.99'):
+            missing = HTTPError('fixture', 404, 'missing', {}, None)
+            main = io.BytesIO(b'# Sphinx inventory version 2\n# Project: PyTorch\n# Version: main (2.16.0a0)\n')
+            with self.subTest(target=target), patch.object(prepare, 'urlopen', side_effect=[missing, main]):
+                if target == '2.16':
+                    self.assertTrue(prepare.nightly_target(target))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'absent from PyPI'):
+                        prepare.nightly_target(target)
+        with patch.object(prepare, 'urlopen', side_effect=OSError('timeout')) as get:
+            with self.assertRaisesRegex(ValueError, 'Cannot verify'):
+                prepare.nightly_target('2.14')
+            get.assert_called_once()
+
+    def test_patch_targets_are_rejected_before_network_and_publication(self):
+        for args in (['--torch-version','2.14.0'], ['--torch-version','2.14.1'],
+                     ['--requirement','torch==2.14.1']):
+            with self.subTest(args=args), patch.object(prepare, 'urlopen') as get, redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(prepare.main(['--api','torch.abs','--run-dir',str(self.f.run_dir),*args]), 1)
+                self.assertIn('major.minor', err.getvalue())
+                get.assert_not_called()
+                self.assertFalse(self.f.run_dir.exists())
 
     def test_inactive_marker_does_not_remove_required_default_for_target_python(self):
         result = prepare.merge_requirements(b'pytest==8.4.2\n',

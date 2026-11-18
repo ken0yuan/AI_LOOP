@@ -9,7 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from refresh_api_support_db import ROOT, BUSINESS_COLUMNS, has_value as text, read_json, resolve, stage_output
+from refresh_api_support_db import ROOT, BUSINESS_COLUMNS, has_value as text, read_json, require_nightly, resolve, stage_output
 
 COLUMNS = BUSINESS_COLUMNS
 DEFAULTS = {'是否支持': '未提供', 'API等级': 'L2',
@@ -17,7 +17,7 @@ DEFAULTS = {'是否支持': '未提供', 'API等级': 'L2',
 CLASSIFICATION = ('分类', '细分模块', '细分场景')
 STAGES = ('category', 'module', 'scenario')
 REASONS = ('category_reason', 'module_reason', 'scenario_reason')
-TYPES = {'框架类API', '算子类API', '专项适配API'}
+TYPES = {'框架类API', '算子类API', '分布式类API', '图模式类API', '专项适配API'}
 PLACEHOLDERS = {'未知', '待分类', '待确定', '待补充', '待审核', 'null', 'none'}
 
 
@@ -200,7 +200,7 @@ def complete(basic_information, database=None, new_apis=None, entries=None, *, r
     root = Path(root).resolve()
     basic_path = resolve(basic_information, root)
     basic = read_json(basic_path)
-    require(isinstance(basic, dict) and text(basic.get('venv')), 'Step 0 venv is required')
+    require_nightly(basic, root)
     require((resolve(basic['venv'], root) / 'bin/python').is_file(), 'Step 0 venv interpreter missing')
     task = basic_path.parent.resolve()
     names_path = resolve(new_apis, root) if new_apis else task / 'api-refresh/new-apis.json'

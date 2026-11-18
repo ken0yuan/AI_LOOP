@@ -1,4 +1,10 @@
 {
-  "adapt-torch.export.exported_program.ModuleCallEntry": "adapt-set-633d5e250fcc",
-  "adapt-torch.export.exported_program.ModuleCallSignature": "adapt-set-633d5e250fcc"
+  "nightly": {
+    "adapt-torch.export.exported_program.ModuleCallEntry": "adapt-set-633d5e250fcc",
+    "adapt-torch.export.exported_program.ModuleCallSignature": "adapt-set-633d5e250fcc"
+  },
+  "2.15": {
+    "adapt-torch.nn.functional.ScalingType": "adapt-2.15-set-7f849485c73c",
+    "adapt-torch.nn.functional.SwizzleType": "adapt-2.15-set-7f849485c73c"
+  }
 }

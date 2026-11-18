@@ -34,7 +34,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.identity(self.repo)
         self.g('checkout', '--detach', repo=self.repo)
         self.mapping = self.root / 'data/branch-mapping.json'
-        step3.write_json(self.mapping, {})
+        step3.write_json(self.mapping, {'nightly': {}})
 
     def g(self, *args, repo=None):
         result = subprocess.run(['git', '-C', str(repo or self.repo), *args],
@@ -89,7 +89,26 @@ class DevelopmentBranchTests(unittest.TestCase):
         return commit
 
     def record(self, **mapping):
-        step3.write_json(self.mapping, mapping)
+        step3.write_json(self.mapping, {'nightly': mapping})
+
+    def test_versions_separate_same_task_and_keep_legacy_nightly_branch(self):
+        task = 'adapt-torch.abs'
+        legacy = 'adapt-set-123456789abc'
+        self.source_branch(legacy)
+        step3.write_json(self.mapping, {task: legacy})
+        fixed = self.task('torch.abs', run='fixed')
+        info = step3.read_object(fixed)
+        info['venv'] = 'data/venv/torch-2.15.0/python-3.11.17'
+        step3.write_json(fixed, info)
+        branch = self.run_step3(fixed)['development-branch']
+        self.assertRegex(branch, r'^adapt-2\.15-set-[0-9a-f]{12}$')
+        self.assertEqual(step3.read_object(self.mapping), {'nightly': {task: legacy}, '2.15': {task: branch}})
+        self.assertTrue(self.run_step3(self.task('torch.abs', run='nightly'))['stop-task'])
+        self.assertEqual(self.run_step3(fixed)['development-branch'], branch)
+        info['venv'] = 'data/venv/python-3.11.17'
+        step3.write_json(fixed, info)
+        with self.assertRaisesRegex(ValueError, 'group'):
+            self.run_step3(fixed)
 
     def test_new_batch_creates_one_branch_and_preserves_step21_and_wheel_identity(self):
         basic = self.task('Tensor.foo', 'Tensor.bar')
@@ -103,9 +122,9 @@ class DevelopmentBranchTests(unittest.TestCase):
         with patch.object(step3, 'git', side_effect=observing):
             result = self.run_step3(basic)
         branch = result['development-branch']
-        self.assertRegex(branch, r'^adapt-set-[0-9a-f]{12}$')
+        self.assertRegex(branch, r'^adapt-nightly-set-[0-9a-f]{12}$')
         self.assertEqual(len(calls), 1)
-        self.assertEqual(step3.read_object(self.mapping), {
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {
             'adapt-Tensor.foo': branch, 'adapt-Tensor.bar': branch})
         self.assertEqual(self.adapt(basic)['task-branches'], ['adapt-Tensor.foo', 'adapt-Tensor.bar'])
         self.assertEqual(self.adapt(basic)['development-branch'], branch)
@@ -123,10 +142,10 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertNotEqual(result['development-branch'], branch)
         self.assertEqual(self.adapt(basic)['git-control']['action'], 'EXTEND')
         self.assertTrue(step3.ancestor(self.repo, previous))
-        self.assertEqual(step3.read_object(self.mapping), {
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {
             'adapt-Tensor.foo': branch, 'adapt-Tensor.bar': branch,
             'adapt-Tensor.baz': result['development-branch']})
-        self.assertEqual(len(step3.read_object(self.mapping)), 3)
+        self.assertEqual(len(step3.read_object(self.mapping)['nightly']), 3)
         self.assertEqual(self.g('rev-parse', branch), previous)
 
     def test_combines_all_sources_and_inherits_unrequested_members(self):
@@ -143,7 +162,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         for commit in [left, right, self.g('rev-parse', 'upstream/master')]:
             self.assertTrue(step3.ancestor(self.repo, commit))
         self.assertFalse(step3.ancestor(self.repo, unrelated))
-        mapping = step3.read_object(self.mapping)
+        mapping = step3.read_object(self.mapping)['nightly']
         self.assertEqual(mapping['adapt-Tensor.foo'], 'adapt-set-left')
         self.assertEqual(mapping['adapt-Tensor.bar'], 'adapt-set-left')
         self.assertEqual(mapping['adapt-Tensor.baz'], 'adapt-set-right')
@@ -248,7 +267,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(result['status'], 'BRANCH_READY')
         self.assertEqual(result['development-branch'], branch)
         self.assertTrue(step3.ancestor(self.repo, third))
-        self.assertEqual(step3.read_object(self.mapping), {
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {
             'adapt-Tensor.foo':'adapt-set-left', 'adapt-Tensor.bar':'adapt-set-left',
             'adapt-Tensor.baz':'adapt-set-right', 'adapt-Tensor.qux':'adapt-set-third',
             'adapt-Tensor.new':branch})
@@ -296,7 +315,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         with patch.object(step3, 'write_json', side_effect=fail_ready):
             with self.assertRaisesRegex(OSError, 'publication failure'):
                 self.run_step3(basic)
-        branch = step3.read_object(self.mapping)['adapt-Tensor.foo']
+        branch = step3.read_object(self.mapping)['nightly']['adapt-Tensor.foo']
         self.assertEqual(self.adapt(basic)['git-control']['status'], 'FAILED')
         recovered = self.run_step3(basic)
         self.assertEqual(recovered['development-branch'], branch)
@@ -308,7 +327,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertNotEqual(result['development-branch'], 'adapt-Tensor.foo')
         self.assertFalse(step3.ancestor(self.repo, commit))
         self.assertEqual(self.g('rev-parse', 'adapt-Tensor.foo'), commit)
-        self.assertEqual(step3.read_object(self.mapping)['adapt-Tensor.bar'], result['development-branch'])
+        self.assertEqual(step3.read_object(self.mapping)['nightly']['adapt-Tensor.bar'], result['development-branch'])
 
     def test_duplicate_json_keys_and_empty_task_identifiers_are_rejected(self):
         basic = self.task('Tensor.foo')
@@ -336,7 +355,8 @@ class DevelopmentBranchTests(unittest.TestCase):
     def test_cli_emits_machine_readable_ready_and_selected_branch(self):
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for filename in ['prepare_development_branch.py', 'preparation_state.py']:
+        for filename in ['prepare_development_branch.py', 'preparation_state.py', 'branch_mapping.py',
+                         'refresh_api_support_db.py', 'api_refresh_runtime.py', 'api_first_seen.py']:
             (scripts / filename).write_bytes((Path(step3.__file__).parent / filename).read_bytes())
         basic = self.task('Tensor.foo')
         result = subprocess.run([sys.executable, '-B', str(scripts / 'prepare_development_branch.py'),
@@ -380,7 +400,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'preserving local commits'):
             self.run_step3(basic)
         self.assertEqual(self.g('rev-parse', 'master'), local)
-        self.assertEqual(step3.read_object(self.mapping), {})
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {})
 
     def test_source_refresh_uses_upstream_and_preserves_fork(self):
         import fetch_latest_sources as sources
@@ -478,7 +498,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertIn('测试按要求暂不执行', result['message'])
         self.assertEqual(adapt['git-control']['checkout-base'], 'refs/heads/adapt-set-dependency')
         self.assertEqual(self.g('rev-parse', 'origin/adapt-set-dependency'), dependency)
-        self.assertEqual(step3.read_object(self.mapping), {
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {
             'adapt-Tensor.foo':'adapt-set-dependency', 'adapt-Tensor.bar':'adapt-set-dependency',
             'adapt-Tensor.new':branch})
         retry = self.run_step3(basic)
@@ -510,7 +530,8 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.record(**{'adapt-Tensor.foo': 'adapt-set-existing'})
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for filename in ['prepare_development_branch.py', 'preparation_state.py']:
+        for filename in ['prepare_development_branch.py', 'preparation_state.py', 'branch_mapping.py',
+                         'refresh_api_support_db.py', 'api_refresh_runtime.py', 'api_first_seen.py']:
             (scripts / filename).write_bytes((Path(step3.__file__).parent / filename).read_bytes())
         basic = self.task('Tensor.foo')
         result = subprocess.run([sys.executable, '-B', str(scripts / 'prepare_development_branch.py'),
@@ -538,8 +559,8 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(result['task-branches'], request)
         self.assertNotIn('api-branches', result)
         self.assertEqual(self.adapt(basic)['task-branches'], request)
-        self.assertEqual(step3.read_object(self.mapping), dict.fromkeys(request, branch))
-        self.assertRegex(branch, r'^adapt-set-[0-9a-f]{12}$')
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], dict.fromkeys(request, branch))
+        self.assertRegex(branch, r'^adapt-nightly-set-[0-9a-f]{12}$')
 
     def test_generic_existing_tasks_stop_without_merge_or_refresh(self):
         left = self.source_branch('adapt-set-left')
@@ -571,8 +592,8 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(self.adapt(basic)['task-branches'], ['feature-checkpoint'])
         self.assertEqual(result['task-branches'], ['feature-checkpoint'])
         self.assertIn('测试按要求暂不执行', result['message'])
-        self.assertEqual(set(step3.read_object(self.mapping)), {'fix-timeout', 'legacy-feature', 'feature-checkpoint'})
-        self.assertEqual(step3.read_object(self.mapping), {
+        self.assertEqual(set(step3.read_object(self.mapping)['nightly']), {'fix-timeout', 'legacy-feature', 'feature-checkpoint'})
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {
             'fix-timeout':'adapt-set-dependency', 'legacy-feature':'adapt-set-dependency',
             'feature-checkpoint':branch})
         self.assertTrue(step3.ancestor(self.repo, dependency))
@@ -582,7 +603,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         basic = self.named_tasks(['same-task', 'same-task'])
         with self.assertRaisesRegex(ValueError, 'unique task identifiers'):
             self.run_step3(basic)
-        self.assertEqual(step3.read_object(self.mapping), {})
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {})
         self.assertEqual(self.g('rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD')
 
     def test_legacy_api_checkpoint_is_normalized_without_new_branch(self):
@@ -612,7 +633,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         result = self.run_step3(basic)
         self.assertEqual(self.adapt(basic)['task-branches'], ['fix-timeout', 'feature-checkpoint'])
         self.assertEqual(result['task-branches'], ['fix-timeout', 'feature-checkpoint'])
-        self.assertEqual(set(step3.read_object(self.mapping)), {'fix-timeout', 'feature-checkpoint'})
+        self.assertEqual(set(step3.read_object(self.mapping)['nightly']), {'fix-timeout', 'feature-checkpoint'})
 
     def test_array_rejects_empty_or_non_string_task_identifiers(self):
         for request in [[], [''], [None], [123], [['nested']], 'one-task']:
@@ -620,7 +641,7 @@ class DevelopmentBranchTests(unittest.TestCase):
                 basic = self.named_tasks(request)
                 with self.assertRaisesRegex(ValueError, 'nonempty task'):
                     self.run_step3(basic)
-        self.assertEqual(step3.read_object(self.mapping), {})
+        self.assertEqual(step3.read_object(self.mapping)['nightly'], {})
 
 
 
@@ -679,7 +700,7 @@ class DevelopmentBranchTests(unittest.TestCase):
         self.assertEqual(result['task-branches'],['feature-checkpoint'])
         self.assertEqual(self.adapt(basic)['git-control']['source-branches'],['adapt-set-dependency'])
         self.assertTrue(self.g('branch','--list','adapt-set-dependency'))
-        self.assertEqual(step3.read_object(self.mapping),{'feature-checkpoint':first['development-branch']})
+        self.assertEqual(step3.read_object(self.mapping)['nightly'],{'feature-checkpoint':first['development-branch']})
 
     def test_retry_uses_updated_local_dependency_and_discards_legacy_snapshot(self):
         self.source_branch('adapt-set-dependency')

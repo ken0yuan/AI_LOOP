@@ -44,11 +44,60 @@ class AdaptInformationTests(unittest.TestCase):
             conn.execute('ALTER TABLE "API支持数据" ADD COLUMN "适配策略" TEXT DEFAULT "补充testcase"')
         self.output = self.task / 'adapt-information.json'
 
-    def description(self, text):
-        self.basic.write_text(json.dumps({'problem-description':text}, ensure_ascii=False), encoding='utf-8')
+    def description(self, text, venv='data/venv/python-3.11.17', **fields):
+        self.basic.write_text(json.dumps({'problem-description':text, 'venv':venv, **fields},
+                                         ensure_ascii=False), encoding='utf-8')
 
     def run_prepare(self):
         return prepare.prepare(self.basic, root=self.root)
+
+    def test_same_named_api_uses_only_the_selected_table(self):
+        with self.connection() as conn:
+            conn.execute('CREATE TABLE "API支持数据_2.14" AS SELECT * FROM "API支持数据"')
+            conn.execute('UPDATE "API支持数据_2.14" SET "API真正名字"=? WHERE "API名称"=?', ('view', 'Tensor.add'))
+            conn.execute('UPDATE "API支持数据_2.14" SET "适配策略"=? WHERE "API名称"=?',
+                         ('已支持', 'torch.nn.functional.relu'))
+        batch = '2.14 API `torch.Tensor.add` `torch.nn.functional.relu` needs adaptation'
+        before = self.database.read_bytes()
+        for release, python in [('2.14', '3.10.14'), ('2.14.1', '3.11.17')]:
+            with self.subTest(release=release):
+                self.description(batch, str(self.root/f'data/venv/torch-{release}/python-{python}'),
+                                 torch_npu_version='2.16.0.dev20261101', pytorch_version=release+'+cpu')
+                result = self.run_prepare()
+                self.assertEqual(result['status'], 'ADAPT_INFORMATION_READY')
+                self.assertEqual(result['skipped_apis'], ['torch.nn.functional.relu'])
+                self.assertEqual(json.loads(self.output.read_bytes()), {'task-branches':['adapt-view']})
+        self.description(batch)
+        self.run_prepare()
+        self.assertEqual(json.loads(self.output.read_bytes()),
+                         {'task-branches':['adapt-Tensor.add', 'adapt-torch.nn.functional.relu']})
+        self.assertEqual(self.database.read_bytes(), before)
+        self.assertFalse((self.task/'api-refresh').exists())
+
+    def test_fixed_table_and_all_requested_names_must_exist(self):
+        self.description('2.14 API `view` `Tensor.add` needs adaptation', 'data/venv/torch-2.14/python-3.11.17')
+        with self.assertRaisesRegex(ValueError, 'table missing: API支持数据_2.14'):
+            self.run_prepare()
+        with self.connection() as conn:
+            conn.execute('CREATE TABLE "API支持数据_2.14" AS SELECT * FROM "API支持数据" WHERE "API名称"=?', ('view',))
+        with self.assertRaisesRegex(ValueError, 'API支持数据_2.14.*Tensor.add'):
+            self.run_prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_fixed_env_rejects_new_api_mode_even_with_nightly_handoff(self):
+        self.latest(['view'])
+        self.description('New API needs adaptation', 'data/venv/torch-2.14/python-3.11.17')
+        with self.assertRaisesRegex(ValueError, 'explicit API names'):
+            self.run_prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_unrecognized_venv_never_selects_nightly(self):
+        for path in [None, '', 'data/venv/torch-wrong/python-3.11.17', 'other/venv/python-3.11.17']:
+            with self.subTest(path=path):
+                self.description('API `view` needs adaptation', path)
+                with self.assertRaisesRegex(ValueError, 'venv path'):
+                    self.run_prepare()
+                self.assertFalse(self.output.exists())
 
     def test_multiple_apis_only_local_yes_and_exact_database_names(self):
         self.description('需要适配torch.Tensor.add、torch.nn.functional.relu。另有 torch.already_done。')
@@ -80,8 +129,7 @@ class AdaptInformationTests(unittest.TestCase):
                 self.assertEqual(self.output.read_bytes(), before)
 
     def latest(self, names=()):
-        self.basic.write_text(json.dumps({'problem-description':'New API needs adaptation',
-                                         'pytorch_version':'2.16.0a0+gitfixture'}))
+        self.description('New API needs adaptation', pytorch_version='2.16.0a0+gitfixture')
         path = self.task/'api-refresh/added-apis.json'
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(list(names)))
@@ -338,7 +386,7 @@ class AdaptInformationTests(unittest.TestCase):
         scripts = self.root/'scripts'
         scripts.mkdir()
         source = Path(prepare.__file__).resolve().parent
-        for name in ['prepare_adapt_information.py','refresh_api_support_db.py','api_refresh_runtime.py','api_first_seen.py']:
+        for name in ['prepare_adapt_information.py','branch_mapping.py','refresh_api_support_db.py','api_refresh_runtime.py','api_first_seen.py']:
             (scripts/name).write_bytes((source/name).read_bytes())
         self.description('API `Tensor.add` needs adaptation')
         result = subprocess.run([sys.executable,'-B',str(scripts/'prepare_adapt_information.py'),

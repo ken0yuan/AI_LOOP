@@ -51,7 +51,7 @@ class RefreshTests(unittest.TestCase):
         for name in ['refresh_api_support_db.py', 'api_refresh_runtime.py', 'api_first_seen.py',
                      'scan_documented_apis.py', 'extract_docs_inventory.py']:
             shutil.copyfile(source / name, self.scripts / name)
-        self.venv = self.root / 'data/venv/fixture'
+        self.venv = self.root / 'data/venv/python-3.11.17'
         venv.EnvBuilder(with_pip=False).create(self.venv)
         result = subprocess.run([str(self.venv / 'bin/python'), '-I', '-B', '-c',
                                  'import site;print(site.getsitepackages()[0])'],
@@ -67,7 +67,7 @@ class RefreshTests(unittest.TestCase):
         self.task = self.root / 'data/run_data/adapt-torch.new_api-261109'
         self.task.mkdir(parents=True)
         self.basic = self.task / 'basic_information.json'
-        self.basic.write_text(json.dumps({'venv': 'data/venv/fixture', 'api_names': ['torch.new_api']}))
+        self.basic.write_text(json.dumps({'venv': 'data/venv/python-3.11.17', 'api_names': ['torch.new_api']}))
         self.database = self.root / 'data/api-support.sqlite3'
         with sqlite3.connect(self.database) as conn:
             conn.execute(SCHEMA)
@@ -175,7 +175,7 @@ class RefreshTests(unittest.TestCase):
         later = self.task.parent / 'adapt-new-261110'
         later.mkdir()
         basic = later / 'basic_information.json'
-        basic.write_text(json.dumps({'venv':'data/venv/fixture', 'pytorch_version':'2.16.0a0'}))
+        basic.write_text(json.dumps({'venv':'data/venv/python-3.11.17', 'pytorch_version':'2.16.0a0'}))
         result = refresh.refresh(basic, self.database, root=self.root,
                                  extractor=lambda work: {'torch.new_api'}, checker=self.checker)
         self.assertEqual(result['added'], 0)
@@ -498,6 +498,14 @@ cufft_plan_cache = Manager()
         with self.assertRaisesRegex(ValueError, 'venv path'):
             self.run_refresh({'torch.new_api'})
         self.assertFalse(self.output.exists())
+
+    def test_fixed_venv_stops_before_refresh(self):
+        self.basic.write_text(json.dumps({'venv':'data/venv/torch-2.14/python-3.11.17'}))
+        before = self.database.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'directly to prepare_adapt_information'):
+            self.run_refresh({'torch.new_api'})
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.database.read_bytes(), before)
 
     def test_concurrent_database_edits_are_preserved(self):
         self.insert('torch.stay')

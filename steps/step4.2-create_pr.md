@@ -12,6 +12,7 @@
 | `issue.json.number` | 关联 issue 编号 |
 | `issue.json.url` | PR 关联的 issue 链接 |
 | `issue.json.body` | 问题描述与验收目标 |
+| `basic_information.json.venv` | 按 [Step 4 的目录规则](step4-subagent_development.md) 确定本批 API 的适配目标，与关联 issue 核对 |
 | `basic_information.json.torch_npu_latest_source` | 源码仓路径，相对 AI_LOOP 根目录 |
 | `adapt-information.json.adapt-plan.step1.agentname` | 选择对应任务的填写模板 |
 | `adapt-information.json.development-branch` | 本次开发分支 |
@@ -37,13 +38,20 @@
 | `device_validation.cuda.reason` | GPU 验证受阻原因（如有） |
 | `notes` | 失败或未完成项的说明 |
 
-沿用开发交接时已完成的本地提交，以 `git rev-parse HEAD` 取得 `REVIEWED_SHA`。`publish_pr.py` 只检查验证交付件存在，正文中的测试信息按填写模板从原始记录核对。
+沿用开发交接时已完成的本地提交，以 `git rev-parse HEAD` 取得 `REVIEWED_SHA`。在 PR 的问题与目标中写明 PyTorch nightly 或固定版本的主次版本号；如果关联 issue 指向另一个适配目标，先回 Step 4.1 核对关联。功能验证分别引用 NPU、GPU 各自报告中的实际 PyTorch 构建，NPU 侧另引 torch-npu 版本。报告未记录的版本标为“未记录”。`publish_pr.py` 检查验证交付件存在，正文中的测试信息由主 agent 对照原始记录核实。
+
+按 Step 4 的平台限制条件发布补测 PR 时，在正文写明实测设备、受限调用、原始错误或支持范围依据，并引用本批报告。区分 API 本身与消费它的算子，分别列出各设备的结果和仍在进行的验证；后续结果更新到同一 PR。
 
 ## 1. 选择模板并保存草稿
 
-1. 按 `agentname` 选择模板。
-   1. `api-adaptation` 使用 torch-npu 目标分支的 `.gitcode/PULL_REQUEST_TEMPLATE.md`，内容按 [API 适配填写模板](../templates/api-adaptation-pr-template.md)填写；栏目和顺序以仓库模板为准。
-   2. 其他任务使用对应的仓库模板；目标分支没有适用模板时使用 [通用 PR 模板](../templates/pr-template.md)，API 任务仍沿用其专属填写规则。
+1. 对于 `api-adaptation`，读取本次 `basic_information.json.venv`，按下表选择填写模板；仓库要求的栏目和顺序以目标分支的 `.gitcode/PULL_REQUEST_TEMPLATE.md` 为准。
+
+   | Step 0 的 venv（相对 AI_LOOP 根目录） | API 适配 PR 填写模板 |
+   |---|---|
+   | `data/venv/python-<Python版本>/` | [nightly 模板](../templates/api-adaptation-pr-template.md)，说明本次 nightly 构建验证了哪些 API |
+   | `data/venv/torch-<torch版本>/python-<Python版本>/` | [固定版本模板](../templates/api-adaptation-fixed-pr-template.md)，写明目标主次版本、该版本专属 issue 和验证结论 |
+
+   绝对路径按同一目录结构识别。固定版本环境即使安装了 nightly 的 torch-npu，也使用固定版本模板。其他任务按 `agentname` 使用对应的仓库模板；目标分支缺少模板时，使用[通用 PR 模板](../templates/pr-template.md)的栏目，API 内容仍按上表填写。
 2. 从目标分支 PR 模板（含 CheckList）及 `CONTRIBUTING.md` 查标题要求；没有规定时写清改动对象和内容。
 3. 按模板填写，在 `RUN_DIR` 中以 UTF-8 保存为 `pr-title.txt`、`pr-body.md`，核对提交和关联 issue，清除占位符及填写提示。
 

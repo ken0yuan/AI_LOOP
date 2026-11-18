@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
-from preparation_state import relative_path, locked, reset_environment, write_json
+from preparation_state import relative_path, locked, reset_environment, write_json, require_nightly_task
 from pip._internal.network.session import PipSession
 from pip._internal.req.req_file import parse_requirements
 from pip._vendor.packaging.utils import canonicalize_name
@@ -148,6 +148,36 @@ def task_inputs(run_dir):
     return task
 
 
+def installation_environment():
+    process_env = os.environ.copy()
+    process_env.pop('PYTHONPATH', None)
+    process_env.update(PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1',
+                       TORCH_DEVICE_BACKEND_AUTOLOAD='0', PIP_DISABLE_PIP_VERSION_CHECK='1',
+                       PIP_NO_CACHE_DIR='1')
+    cann = Path('/usr/local/Ascend/cann/set_env.sh')
+    if cann.is_file():
+        raw = subprocess.run(['bash', '-c', 'source "$1" >/dev/null && env -0',
+                              'install-env', str(cann)], env=process_env, capture_output=True, check=True)
+        process_env.update(x.split('=', 1) for x in raw.stdout.decode().split('\0') if '=' in x)
+        process_env.pop('PYTHONPATH', None)
+    return process_env, cann
+
+
+def finish_environment(basic_path, venv, process_env, cann):
+    env_lines = ['#!/usr/bin/env bash']
+    if cann.is_file():
+        env_lines.append('source ' + shlex.quote(str(cann)))
+    if process_env.get('LD_LIBRARY_PATH'):
+        env_lines.append('export LD_LIBRARY_PATH=' + shlex.quote(process_env['LD_LIBRARY_PATH']))
+    env_lines += ['unset PYTHONPATH', 'export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0',
+                  'source ' + shlex.quote(str(venv / 'bin/activate'))]
+    (venv / 'env.sh').write_text('\n'.join(env_lines) + '\n', encoding='utf-8')
+    set_environment_state(basic_path, 'ENV_READY',
+        python=relative_path(venv/'bin/python', ROOT), venv=relative_path(venv, ROOT),
+        activate=relative_path(venv/'env.sh', ROOT),
+        environment_completed_at=datetime.now(timezone.utc).isoformat())
+
+
 def _install_task(args, run_dir):
     basic_path = run_dir/'basic_information.json'
     try:
@@ -177,17 +207,8 @@ def _install_task(args, run_dir):
         effective.write_text(merged, encoding='utf-8')
         temp = log_dir / '.install-tmp'
         temp.mkdir(exist_ok=True)
-        process_env = os.environ.copy()
-        process_env.pop('PYTHONPATH', None)
-        process_env.update(PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1',
-                           TORCH_DEVICE_BACKEND_AUTOLOAD='0', PIP_DISABLE_PIP_VERSION_CHECK='1',
-                           PIP_NO_CACHE_DIR='1', TMPDIR=str(temp))
-        cann = Path('/usr/local/Ascend/cann/set_env.sh')
-        if cann.is_file():
-            raw = subprocess.run(['bash', '-c', 'source "$1" >/dev/null && env -0',
-                                  'install-env', str(cann)], env=process_env, capture_output=True, check=True)
-            process_env.update(x.split('=', 1) for x in raw.stdout.decode().split('\0') if '=' in x)
-            process_env.pop('PYTHONPATH', None)
+        process_env, cann = installation_environment()
+        process_env['TMPDIR'] = str(temp)
         venv.mkdir(parents=True, exist_ok=True)
         with (venv / '.install.lock').open('a', encoding='utf-8') as lock:
             print('Waiting for Python ' + version + ' environment lock...', flush=True)
@@ -220,18 +241,7 @@ print(json.dumps(dict(python_version=platform.python_version(),pytorch_version=t
             for key in ('pytorch_file', 'torch_npu_file'):
                 if not Path(observed[key]).resolve().is_relative_to(venv.resolve()):
                     raise ValueError('Framework import escaped the selected venv')
-            env_lines = ['#!/usr/bin/env bash']
-            if cann.is_file():
-                env_lines.append('source ' + shlex.quote(str(cann)))
-            if process_env.get('LD_LIBRARY_PATH'):
-                env_lines.append('export LD_LIBRARY_PATH=' + shlex.quote(process_env['LD_LIBRARY_PATH']))
-            env_lines += ['unset PYTHONPATH', 'export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0',
-                          'source ' + shlex.quote(str(venv / 'bin/activate'))]
-            (venv / 'env.sh').write_text('\n'.join(env_lines) + '\n', encoding='utf-8')
-            set_environment_state(basic_path, 'ENV_READY',
-                python=relative_path(exe, ROOT), venv=relative_path(venv, ROOT),
-                activate=relative_path(venv/'env.sh', ROOT), environment_reused=reused,
-                environment_completed_at=datetime.now(timezone.utc).isoformat())
+            finish_environment(basic_path, venv, process_env, cann)
         if temp.is_dir() and not any(temp.iterdir()):
             temp.rmdir()
         print('ENV_READY: ' + relative_path(basic_path, ROOT), flush=True)
@@ -257,6 +267,9 @@ def main():
             raise ValueError('run-dir must be an existing task directory under data/run_data')
         context = nullcontext() if args.dry_run else locked(run_dir/'log/.step0-entry.lock')
         with context:
+            basic_path = run_dir/'basic_information.json'
+            if basic_path.is_file():
+                require_nightly_task(basic_path, read_json(basic_path))
             return _install_task(args, run_dir)
     except Exception as error:
         print('ENV_INSTALL_FAILED: '+str(error), file=sys.stderr, flush=True)

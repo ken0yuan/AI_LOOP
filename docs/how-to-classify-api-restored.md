@@ -56,7 +56,7 @@ The initial PR presents the SQLite classification changes, candidate definitions
 
 ## API adaptation category
 
-`API适配分类` is separate from both the L0/L1/L2 priority and the three-level classification described above. Its allowed values are `框架类API`, `算子类API`, and `专项适配API`.
+`API适配分类` is separate from both the L0/L1/L2 priority and the three-level classification described above. Its allowed values are `框架类API`, `算子类API`, `分布式类API`, `图模式类API`, and `专项适配API`.
 
 When importing the existing 2.15 spreadsheet, the mapping types `NPU自定义算子`, `单算子`, and `组合算子` were mapped to `算子类API`; other entries were mapped to `框架类API`. This describes the historical import, rather than a rule for classifying newly discovered APIs.
 

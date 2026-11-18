@@ -113,6 +113,7 @@ def main(argv=None):
     basic = None
     if args.basic_information:
         basic_path, basic = task_state.load_basic(args.basic_information, args.data_root)
+        task_state.require_nightly_task(basic_path, basic)
         config = task_state.task_config(basic)
         previous_path = args.previous_record or basic_path.parent / 'log/step0-preparation.json'
         protected += [basic_path, basic_path.parent / 'log/step0-preparation.json']

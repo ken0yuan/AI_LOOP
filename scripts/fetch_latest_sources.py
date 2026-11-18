@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from preparation_state import locked, load_basic, task_config, publish, record_failure, sha256, write_json, relative_path, relative_metadata, WHEEL_FIELDS, reset_environment
+from preparation_state import locked, load_basic, require_nightly_task, task_config, publish, record_failure, sha256, write_json, relative_path, relative_metadata, WHEEL_FIELDS, reset_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT/'data'
@@ -278,7 +278,8 @@ def main(argv=None):
     try:
         import fetch_nightly_wheels as framework
         path,basic=load_basic(args.basic_information,DATA)
-        with locked(path.parent/'log/.step0-entry.lock'):
+        require_nightly_task(path, basic)
+        with locked(path.parent/'log/.step0-entry.lock'), locked(DATA/'.fetch-framework-inputs.lock'):
             path,basic=load_basic(path,DATA)
             if not args.dry_run:
                 basic=reset_environment(basic)

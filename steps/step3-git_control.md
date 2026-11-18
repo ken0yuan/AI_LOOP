@@ -10,7 +10,7 @@
 |---|---|
 | `data/run_data/<run-id>/basic_information.json` | `torch_npu_latest_source`指定固定仓库`data/source_code/torch_npu` |
 | 同一run-id下的`adapt-information.json` | `task-branches`提供本次任务名单 |
-| `data/branch-mapping.json` | 保存“任务标识 → 实际开发分支”的对应关系 |
+| `data/branch-mapping.json` | 按 Step 0 的 venv 选择版本分组，组内保存任务标识与开发分支的对应关系 |
 
 从AI_LOOP根目录执行，相对路径也以该目录为基准：
 
@@ -28,10 +28,10 @@ python3 -B scripts/prepare_development_branch.py \
 | 字段或文件 | 示例 | 含义 |
 |---|---|---|
 | `adapt-information.json.task-branches` | `["foo", "bar", "baz"]` | 本次任务名单 |
-| `branch-mapping.json` | `{"foo": "分支A", "bar": "分支A"}` | foo、bar已归分支A负责 |
-| `adapt-information.json.development-branch` | `"adapt-set-a31f92c8d570"` | 存在新增任务时，本次准备的实际开发分支 |
+| `branch-mapping.json` | `{"nightly": {"foo": "分支A"}, "2.15": {"foo": "分支B"}}` | 两个版本的 foo 分别归各自的分支负责 |
+| `adapt-information.json.development-branch` | `"adapt-2.15-set-a31f92c8d570"` | 存在新增任务时，本次准备的实际开发分支 |
 
-一个分支可负责多个任务。新分支名称由脚本生成，任务标识本身不用于Git分支命名校验。
+同一版本的多个任务可共用分支。新分支名为 `adapt-<主次版本或nightly>-set-<标识>`。旧扁平映射归入 `nightly`，已有分支沿用原名。
 
 ## 第一步：查询已有任务
 

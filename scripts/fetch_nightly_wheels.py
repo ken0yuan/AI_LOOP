@@ -184,8 +184,8 @@ def wheel_info(path, config):
         if version_file in wheel.namelist():
             tree = ast.parse(wheel.read(version_file).decode('utf-8'))
             for node in tree.body:
-                if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-                        and any(isinstance(t, ast.Name) and t.id == 'git_version' for t in node.targets)
+                if (isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant)
+                        and any(isinstance(t, ast.Name) and t.id == 'git_version' for t in (node.targets if isinstance(node, ast.Assign) else [node.target]))
                         and isinstance(node.value.value, str)
                         and re.fullmatch('[0-9a-fA-F]{40}', node.value.value)):
                     commit = node.value.value.lower()
@@ -281,13 +281,32 @@ def resolve(config):
     return downloader,selection
 
 
+def publish_wheel_inputs(path, basic, selection, wheels, data_root, wheel_source, sources=None):
+    checkout = source_fetch.complete_wheel_sources(wheels['torch-npu'],
+        path.parent/'log/fetch-latest-sources.log',data_root=data_root,
+        result_path=path.parent/'log/step0-source.json',ref=basic.get('torch_npu_ref'))
+    if sources is None:
+        sources = json.loads((path.parent/'log/step0-preparation.json').read_text())['sources']
+    sources['torch_npu'].update(checkout, type='git-wheel')
+    sources['torch_npu'].pop('main_branch', None)
+    updates = {'pytorch_version':wheels['torch']['version'], 'pytorch_wheel':wheels['torch']['path'],
+               'torch_npu_version':wheels['torch-npu']['version'], 'torch_npu_wheel':wheels['torch-npu']['path'],
+               'pytorch_wheel_commit':wheels['torch']['commit'], 'torch_npu_wheel_commit':wheels['torch-npu']['commit']}
+    updates['torch_npu_commit']=checkout['commit']
+    updated=task_state.publish(path,basic,updates,{'selection':selection,'wheels':wheels,'sources':sources,
+                'wheel_source':wheel_source,'wheels_completed_at':datetime.now(timezone.utc).isoformat()},root=ROOT)
+    return updated
+
+
 def fetch_for_task(args):
     if args.defaults is not None or any(getattr(args,k) is not None for k in task_state.ENVIRONMENT):
         raise ValueError('Task mode reads target/configuration from basic_information.json; omit defaults and target overrides')
     path, basic = task_state.load_basic(args.basic_information, args.data_root)
     context = nullcontext() if args.dry_run else task_state.locked(path.parent/'log/.step0-entry.lock')
-    with context:
+    framework_lock = nullcontext() if args.dry_run else task_state.locked(args.data_root/'.fetch-framework-inputs.lock')
+    with context, framework_lock:
         path, basic = task_state.load_basic(path, args.data_root)
+        task_state.require_nightly_task(path, basic)
         phase='selection'
         try:
             if not args.dry_run:
@@ -306,18 +325,7 @@ def fetch_for_task(args):
             phase='wheels'
             wheels = download_wheels(selection,downloader,config,data_root=args.data_root)
             phase='source-switch'
-            checkout = source_fetch.complete_wheel_sources(wheels['torch-npu'],
-                path.parent/'log/fetch-latest-sources.log',data_root=args.data_root,
-                result_path=path.parent/'log/step0-source.json',ref=basic.get('torch_npu_ref'))
-            sources = json.loads((path.parent/'log/step0-preparation.json').read_text())['sources']
-            sources['torch_npu'].update(checkout, type='git-wheel')
-            sources['torch_npu'].pop('main_branch', None)
-            updates = {'pytorch_version':wheels['torch']['version'], 'pytorch_wheel':wheels['torch']['path'],
-                       'torch_npu_version':wheels['torch-npu']['version'], 'torch_npu_wheel':wheels['torch-npu']['path'],
-                       'pytorch_wheel_commit':wheels['torch']['commit'], 'torch_npu_wheel_commit':wheels['torch-npu']['commit']}
-            updates['torch_npu_commit']=checkout['commit']
-            updated=task_state.publish(path,basic,updates,{'selection':selection,'wheels':wheels,'sources':sources,
-                        'wheel_source':'obs-latest-complete-bundle','wheels_completed_at':datetime.now(timezone.utc).isoformat()},root=ROOT)
+            updated = publish_wheel_inputs(path, basic, selection, wheels, args.data_root, 'obs-latest-complete-bundle')
             print(updated['preparation_status']+': '+task_state.relative_path(path, ROOT))
             return 0
         except Exception as error:

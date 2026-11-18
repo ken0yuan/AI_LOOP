@@ -85,15 +85,73 @@ class ReconcileTests(unittest.TestCase):
     def reconcile(self,remote=None):
         return script.reconcile(self.basic,root=self.root,viewer=lambda _:remote or self.remote)
 
+    def fixed_version_pr(self):
+        fixed_branch = 'adapt-2.15-set-123456789abc'
+        self.git('branch', '-m', self.branch, fixed_branch)
+        self.branch = fixed_branch
+        self.merge_upstream()
+        self.remote['head']['ref'] = fixed_branch
+        record = json.loads(self.record.read_text())
+        record.update(head=fixed_branch)
+        record['api-status'] = {'torch.alias': '支持'}
+        self.record.write_text(json.dumps(record))
+        self.basic.write_text(json.dumps({'venv': 'data/venv/python-3.11.17'}))
+        groups = {'nightly': {'adapt-torch.other': 'adapt-nightly-set-abcdef123456'},
+                  '2.15': {'adapt-torch.other': fixed_branch, 'adapt-torch.foo': 'another-branch'}}
+        self.mapping.write_text(json.dumps(groups))
+        return groups
+
+    def test_nightly_run_closes_only_fixed_pr_table_group_and_evidence(self):
+        groups = self.fixed_version_pr()
+        nightly = self.rows()
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute('CREATE TABLE "API支持数据_2.15" AS SELECT * FROM "API支持数据"')
+            c.execute('UPDATE "API支持数据_2.15" SET "API真正名字"=? WHERE "API名称"=?',
+                      ('torch.other', 'torch.alias'))
+        directory = self.db.parent / 'api-classification'
+        directory.mkdir()
+        shared = directory / 'classification-evidence.jsonl'
+        reasons = b'{"api":"torch.alias"}\n{"api":"torch.foo"}\n'
+        pending = {'kind':'definition', 'level':'category', 'parent':[], 'name':'基础计算', 'review_status':'待审核'}
+        reasons += (json.dumps(pending) + '\n').encode()
+        shared.write_bytes(reasons)
+        self.assertTrue(self.reconcile()['complete'])
+        self.assertEqual(self.rows(), nightly)
+        with closing(sqlite3.connect(self.db)) as c:
+            rows = c.execute('SELECT "API名称","是否支持","适配策略","分类待审核" FROM "API支持数据_2.15" '
+                             'ORDER BY "API名称"').fetchall()
+            self.assertEqual(rows, [('torch.alias','未提供',None,'是'), ('torch.foo','未提供','补充testcase','是'),
+                                    ('torch.other','支持','已支持','否')])
+        del groups['2.15']['adapt-torch.other']
+        self.assertEqual(json.loads(self.mapping.read_text()), groups)
+        self.assertEqual(shared.read_bytes(), reasons)
+        self.assertFalse(self.record.exists())
+
+    def test_missing_fixed_table_or_api_keeps_pr_pending(self):
+        groups = self.fixed_version_pr()
+        nightly = self.rows()
+        for missing in ('table', 'api'):
+            if missing == 'api':
+                with closing(sqlite3.connect(self.db)) as c, c:
+                    c.execute('CREATE TABLE "API支持数据_2.15" AS SELECT * FROM "API支持数据" WHERE 0')
+            with self.subTest(missing=missing):
+                self.assertFalse(self.reconcile()['complete'])
+                self.assertTrue(self.record.exists())
+                self.assertEqual(json.loads(self.mapping.read_text()), groups)
+                self.assertEqual(self.rows(), nightly)
+
     def test_merge_backfills_and_removes_records_but_preserves_branches(self):
         self.merge_upstream();before_refs=self.git('show-ref');current=self.git('branch','--show-current')
+        fixed = {'adapt-torch.foo': 'adapt-2.15-set-beef12345678'}
+        self.mapping.write_text(json.dumps({'nightly': json.loads(self.mapping.read_text()), '2.15': fixed}))
         result=self.reconcile()
         self.assertTrue(result['complete'])
         with closing(sqlite3.connect(self.db)) as c:
             self.assertEqual(c.execute('SELECT "是否支持","适配策略","分类待审核" FROM "API支持数据" WHERE "API名称"="torch.foo"').fetchone(),('支持','已支持','否'))
             self.assertIsNone(c.execute('SELECT "适配策略" FROM "API支持数据" WHERE "API名称"="torch.alias"').fetchone()[0])
             self.assertEqual(c.execute('SELECT "分类待审核" FROM "API支持数据" WHERE "API名称"="torch.other"').fetchone()[0],'是')
-        self.assertEqual(json.loads(self.mapping.read_text()),{'adapt-torch.other':'other-branch'})
+        self.assertEqual(json.loads(self.mapping.read_text())['nightly'],{'adapt-torch.other':'other-branch'})
+        self.assertEqual(json.loads(self.mapping.read_text())['2.15'], fixed)
         self.assertEqual(self.git('show-ref'),before_refs)
         self.assertEqual(self.git('branch','--show-current'),current)
         self.assertTrue(self.git('branch','--list',self.branch))
@@ -130,7 +188,7 @@ class ReconcileTests(unittest.TestCase):
         self.mapping.write_text(json.dumps({'adapt-torch.foo':self.branch,'adapt-torch.other':child}))
         self.git('checkout','master');self.merge_upstream()
         self.assertTrue(self.reconcile()['complete'])
-        self.assertEqual(json.loads(self.mapping.read_text()),{'adapt-torch.other':child})
+        self.assertEqual(json.loads(self.mapping.read_text())['nightly'],{'adapt-torch.other':child})
         self.assertTrue(self.git('branch','--list',child))
 
     def classification_material(self,review='已审核'):
@@ -216,7 +274,7 @@ class ReconcileTests(unittest.TestCase):
     def test_other_tasks_on_same_branch_keep_their_records(self):
         self.merge_upstream();self.mapping.write_text(json.dumps({'adapt-torch.foo':self.branch,'adapt-torch.other':self.branch}))
         self.assertTrue(self.reconcile()['complete'])
-        self.assertEqual(json.loads(self.mapping.read_text()),{'adapt-torch.other':self.branch})
+        self.assertEqual(json.loads(self.mapping.read_text())['nightly'],{'adapt-torch.other':self.branch})
         self.assertTrue(self.git('branch','--list',self.branch))
 
     def test_merge_sync_uses_pr_snapshot_without_adapt_file_or_origin_access(self):

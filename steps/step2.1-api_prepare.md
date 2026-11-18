@@ -1,6 +1,13 @@
 # API 适配前置准备
 
-本步按“刷新数据库 → 补全本轮条目 → 生成本次适配任务”的顺序执行。任务名单来自本次问题描述，与文档刷新发现的新增名单分别处理。
+先读本次 `basic_information.json` 的 `venv`，按 Step 0 创建的目录选择数据表和执行起点。
+
+| `venv`（相对 AI_LOOP 根目录，也可为对应绝对路径） | 使用的数据表 | 从哪里开始 |
+|---|---|---|
+| `data/venv/python-<Python版本>` | `API支持数据` | 从第一步刷新 nightly 主表，再按本轮补全名单进入第二步或第三步 |
+| `data/venv/torch-<torch版本>/python-<Python版本>` | `API支持数据_<torch主版本>.<torch次版本>` | 直接执行第三步的命令，按点名 API 只读查询版本表 |
+
+固定版本取 `torch-` 目录中的主次版本，补丁号不同仍使用同一张表。Python 版本和已安装的 torch-npu wheel 均不参与选表。路径无法识别或版本表缺失时，本轮停止并报告缺项。
 
 ## 输入与数据库
 
@@ -9,8 +16,8 @@
 | 输入 | 用途 |
 |---|---|
 | `data/run_data/<run-id>/basic_information.json` | 读取本次`venv`和`problem-description`，沿用Step 0准备的环境 |
-| `data/api-support.sqlite3` | 读取和更新`API支持数据`表，以`API名称`为主键 |
-| 官方main文档索引 | 获取全部文档API名称；按需复用对应API文档 |
+| `data/api-support.sqlite3` | 按上表选择本次使用的表，以`API名称`为主键 |
+| 官方main文档索引 | nightly 刷新时获取全部文档 API 名称，按需复用对应文档 |
 
 数据库中每个API保留一行，字段顺序如下：
 
@@ -19,7 +26,7 @@
 | 1 | API名称 | 该行对应的API名称，作为唯一主键 | 按名称定位条目；别名也独立保留一行 |
 | 2 | 是否支持 | `支持`、`不支持`、`未提供`、`API删除，待下线`、`文档删除，待下线` | 记录支持结论，并区分wheel中不存在与文档中缺失 |
 | 3 | API等级 | 沿用既有`L0`、`L1`、`L2`分级；历史条目可能为`删除`或空值 | 保留API等级信息，与适配方向、三级职责分类分别记录 |
-| 4 | API适配分类 | `框架类API`、`算子类API`、`专项适配API`；新增待补全时留空 | 标记API的适配方向，供后续选择处理方式和测试规范 |
+| 4 | API适配分类 | `框架类API`、`算子类API`、`分布式类API`、`图模式类API`、`专项适配API`；新增待补全时留空 | 标记API的适配方向，供后续选择处理方式和测试规范 |
 | 5 | 是否对外 | `是`或`否`，记录是否属于对外API | 限定公开API的刷新范围，以及重复组中可选的正名范围 |
 | 6 | 分类 | 一级职责分类，如`Core`、`基础计算`、`工具`、`分布式`、`图模式` | 确定API的主要职责范围，作为模块和场景分类的上级 |
 | 7 | 细分模块 | 所选一级分类下的模块名称 | 在一级职责范围内定位API所属模块 |
@@ -32,7 +39,7 @@
 
 只有wheel中确认不存在、标记为`API删除，待下线`的API，才因接口不可用而从补全名单和`task-branches`中排除。`文档删除，待下线`只记录文档缺失，wheel中仍存在时继续按适配策略和本地任务开关处理，不据此判为不支持。
 
-## 第一步：刷新数据库
+## 第一步：刷新数据库（仅 nightly）
 
 ```bash
 python3 -B scripts/refresh_api_support_db.py \
@@ -56,7 +63,7 @@ python3 -B scripts/refresh_api_support_db.py \
 
 入口成功返回`DATABASE_REFRESHED`。读取本轮`new-apis.json`：非空进入第二步，为空跳过第二步，直接处理第三步的任务需求。索引及wheel核验结果保存在本次运行目录的`log/api-refresh/`中。
 
-## 第二步：补全本轮API条目
+## 第二步：补全本轮API条目（仅 nightly）
 
 以第一步的`new-apis.json`为补全名单，只补正名行的缺失业务字段。已有值保持原样，别名行的空字段保持为空。
 
@@ -116,9 +123,9 @@ python3 -B scripts/update_api_support_entries.py \
 
 ## 第三步：生成本次适配任务
 
-从`basic_information.json.problem-description`读取本次需要适配的API：如果描述里面说明了问题是`New API needs adaptation`，那么适配任务的API为新入库API；如果指明了API名字，从`problem-description`中提取API，已有API也可进入任务名单，是否有新入库API不影响这一步。
+从 `basic_information.json.problem-description` 读取任务需求。固定版本和 nightly 的点名任务都从所选表匹配全部指定名称，再从同一张表读取别名、正名和适配状态。点名任务可以选择已有 API。固定版本要求明确给出 API 名称，无需文档索引、刷新日志或新增名单。
 
-最新API模式只读取本次运行的`api-refresh/added-apis.json`，再按下述规则过滤和去重；不按版本扩大到已有条目，也不使用字段补全名单`new-apis.json`作为适配名单。
+nightly 的 `New API needs adaptation` 只读取本次运行的 `api-refresh/added-apis.json` 作为候选名单，再按下述规则过滤和去重。
 
 ```bash
 python3 -B scripts/prepare_adapt_information.py \
@@ -147,9 +154,13 @@ python3 -B scripts/prepare_adapt_information.py \
 
 至少有一个有效任务时，更新本次`adapt-information.json`，返回`ADAPT_INFORMATION_READY`。无有效任务时返回`NO_ADAPTATION_REQUIRED`并停止；首次运行不创建任务文件，已有文件则将`task-branches`更新为空数组，清除旧开发计划，保留其他任务资料和必要的Git恢复记录。
 
+例如，上次点名一个 API 已经生成了 `adapt-information.json`；这次在同一运行目录追加了一个版本表中没有的 API。脚本在写文件前报错，磁盘上的文件仍是上次的任务名单。此时整批停在本步，修正缺项后重跑，等本次命令返回 `ADAPT_INFORMATION_READY` 再进入 Step 3。
+
 重跑时按当前数据库重建`task-branches`，清除失效的`adapt-plan`等派发结果，并保留仍需使用的Git恢复记录。
 
 ## 输出与完成条件
+
+固定版本只产生本次任务选择结果。下表前五项属于 nightly 的刷新和补全过程。
 
 | 位置 | 内容 |
 |---|---|

@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import uuid
+from branch_mapping import branch_group, grouped_mapping
 
 from preparation_state import locked, write_json
 
@@ -113,19 +114,17 @@ def validate_request(adapt):
     return normalize_task_branches(adapt.get('task-branches'))
 
 
-def load_mapping(path, repo):
-    mapping = read_object(path) if path.exists() else {}
-    for alias, branch in mapping.items():
-        if not alias.strip() or not isinstance(branch, str) or not branch.strip():
-            raise ValueError('Invalid entry in branch-mapping.json: ' + alias)
+def load_mapping(path, repo, group):
+    groups = grouped_mapping(read_object(path) if path.exists() else {})
+    mapping = groups.setdefault(group, {})
     for branch in set(mapping.values()):
         if branch == 'master':
             raise ValueError('A task development branch cannot be master')
         git(repo, 'check-ref-format', '--branch', branch)
-    return mapping
+    return groups
 
 
-def plan(repo, request, mapping, available):
+def plan(repo, request, mapping, available, group):
     master = available.get('refs/heads/master')
     if not master:
         raise ValueError('Local master is missing; finish Step 0 source preparation first')
@@ -155,7 +154,7 @@ def plan(repo, request, mapping, available):
             'original-mappings': {alias: mapping.get(alias) for alias in aliases},
         }
     while True:
-        target = 'adapt-set-' + uuid.uuid4().hex[:12]
+        target = f'adapt-{group}-set-' + uuid.uuid4().hex[:12]
         if not has_local_branch(available, target) and target not in mapping.values():
             break
     action = 'CREATE' if not sources else 'EXTEND'
@@ -309,11 +308,13 @@ def execute(repo, path, adapt, state, mapping_path, mapping):
     if current_branch(repo) != branch or not all(ancestor(repo, source_ref) for source_ref in required_refs):
         raise ValueError('Development branch does not include all required source commits')
     # Read again before publication; preserve unrelated task mappings.
-    mapping = load_mapping(mapping_path, repo)
+    group = state['branch-group']
+    groups = load_mapping(mapping_path, repo, group)
+    mapping = groups[group]
     validate_mapping_snapshot(state, mapping)
     state['stop-task'] = False
     mapping.update({task: branch for task in state['remaining-branches']})
-    write_json(mapping_path, mapping)
+    write_json(mapping_path, groups)
     # Keep the original selection so retry cannot misclassify newly assigned tasks.
     adapt['task-branches'] = list(state['remaining-branches'])
     state['status'] = 'BRANCH_READY'
@@ -355,12 +356,15 @@ def prepare(basic_information, *, root=ROOT):
         adapt = read_object(path)
         request = validate_request(adapt)
         adapt['task-branches'] = list(request)
-        mapping = load_mapping(mapping_path, repo)
+        group = branch_group(basic, root)
+        mapping = load_mapping(mapping_path, repo, group)[group]
         previous = adapt.get('git-control')
         resumable = (isinstance(previous, dict) and previous.get('workflow-version') == 2
                      and previous.get('status') in PENDING | READY)
         if resumable:
             state = normalize_checkpoint(previous)
+            if state.setdefault('branch-group', 'nightly') != group:
+                raise ValueError('Step 0 environment group differs from the saved branch preparation')
             if request not in (state['requested-branches'], state['remaining-branches']):
                 raise ValueError('Task selection changed during a pending preparation; finish the original operation first')
             refresh_completed_sources(state, mapping, repo)
@@ -370,7 +374,8 @@ def prepare(basic_information, *, root=ROOT):
             if operation_paths(repo):
                 raise ValueError('Finish the existing Git operation before preparing a new branch')
             require_clean(repo)
-            state = plan(repo, request, mapping, refs(repo))
+            state = plan(repo, request, mapping, refs(repo), group)
+            state['branch-group'] = group
             save_state(path, adapt, state)
         try:
             return execute(repo, path, adapt, state, mapping_path, mapping)

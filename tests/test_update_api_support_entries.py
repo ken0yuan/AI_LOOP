@@ -33,8 +33,8 @@ class CompleteEntriesTests(unittest.TestCase):
         self.task = self.root / 'data/run_data/adapt-fixture-261109'
         (self.task / 'api-refresh').mkdir(parents=True)
         self.basic = self.task / 'basic_information.json'
-        self.basic.write_text(json.dumps({'venv': 'data/venv/fixture'}), encoding='utf-8')
-        python = self.root / 'data/venv/fixture/bin/python'
+        self.basic.write_text(json.dumps({'venv': 'data/venv/python-3.11.17'}), encoding='utf-8')
+        python = self.root / 'data/venv/python-3.11.17/bin/python'
         python.parent.mkdir(parents=True)
         python.touch()
         self.names = self.task / 'api-refresh/new-apis.json'
@@ -77,6 +77,13 @@ class CompleteEntriesTests(unittest.TestCase):
 
     def run_complete(self):
         return update.complete(self.basic, root=self.root)
+
+    def test_fixed_venv_stops_before_completion(self):
+        self.basic.write_text(json.dumps({'venv':'data/venv/torch-2.14/python-3.11.17'}))
+        before = self.database.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'directly to prepare_adapt_information'):
+            self.run_complete()
+        self.assertEqual(self.database.read_bytes(), before)
 
     def test_only_eleven_fields_and_three_reasons_then_clean_retry(self):
         fields = self.fields()

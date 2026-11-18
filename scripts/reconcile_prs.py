@@ -6,6 +6,7 @@ import argparse
 from contextlib import closing
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -14,6 +15,8 @@ import tempfile
 
 from preparation_state import locked, write_json
 from prepare_development_branch import read_object
+from branch_mapping import grouped_mapping
+from refresh_api_support_db import NIGHTLY_TABLE
 
 ROOT = Path(__file__).resolve().parents[1]
 STRATEGIES = {'补充testcase': '补充testcase', '待适配': '待适配', '支持': '已支持'}
@@ -29,8 +32,10 @@ def replace_text(path, text):
         temporary.unlink(missing_ok=True)
 
 
-def classification_closeout(conn, database, rows):
+def classification_closeout(conn, database, rows, group, table):
     """Prepare approved definitions and remove only this PR's API explanations."""
+    if group != 'nightly':  # Versioned tables already contain classified APIs.
+        return {}, {}, 0
     root = database.parent.parent
     names = {row['API名称'] for row in rows if row['是否对外'] == '是'}
     paths = [database.parent / 'api-classification/classification-evidence.jsonl']
@@ -76,7 +81,7 @@ def classification_closeout(conn, database, rows):
             api = record.get('api')
             if api:
                 try:
-                    canonical = resolve_rows(conn, [api])[api]['API名称']
+                    canonical = resolve_rows(conn, [api], table)[api]['API名称']
                 except ValueError:
                     canonical = api
                 if canonical in names:
@@ -101,18 +106,18 @@ def view_pr(record):
     return value
 
 
-def resolve_rows(conn, names):
+def resolve_rows(conn, names, table):
     rows = {}
     for name in names:
-        row = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?', (name,)).fetchone()
+        row = conn.execute(f'SELECT * FROM "{table}" WHERE "API名称"=?', (name,)).fetchone()
         if row is None:
             alternate = ('torch.' + name if name == 'Tensor' or name.startswith('Tensor.')
                          else name[len('torch.'):] if name.startswith('torch.Tensor') else name)
-            row = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?', (alternate,)).fetchone()
+            row = conn.execute(f'SELECT * FROM "{table}" WHERE "API名称"=?', (alternate,)).fetchone()
         if row is None:
             raise ValueError('PR状态对应的API未登记: ' + name)
         if row['API真正名字']:
-            row = conn.execute('SELECT * FROM "API支持数据" WHERE "API名称"=?',
+            row = conn.execute(f'SELECT * FROM "{table}" WHERE "API名称"=?',
                                (row['API真正名字'],)).fetchone()
         if row is None or row['API真正名字']:
             raise ValueError('PR状态的正名指向无效: ' + name)
@@ -128,6 +133,9 @@ def finish_merged(database, mapping_path, record_path, record, remote):
             or head['repo']['full_name'].lower() != record['fork'].lower()
             or base['repo']['full_name'].lower() != record['repository'].lower()):
         raise ValueError('PR来源、提交或目标与本地发布记录不一致')
+    versioned = re.fullmatch(r'adapt-(nightly|[0-9]+\.[0-9]+)-set-[0-9a-f]{12}', branch)
+    group = versioned[1] if versioned else 'nightly'
+    table = NIGHTLY_TABLE if group == 'nightly' else f'{NIGHTLY_TABLE}_{group}'
     adapt_path = record_path.parent / 'adapt-information.json'
     statuses = record.get('api-status')
     if statuses is None and adapt_path.is_file():
@@ -139,7 +147,7 @@ def finish_merged(database, mapping_path, record_path, record, remote):
     with closing(sqlite3.connect(database.as_uri() + '?mode=rw', uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute('BEGIN IMMEDIATE')
-        rows = resolve_rows(conn, statuses)
+        rows = resolve_rows(conn, statuses, table)
         canonical_status = {}
         for name, row in rows.items():
             canonical = row['API名称']
@@ -147,16 +155,16 @@ def finish_merged(database, mapping_path, record_path, record, remote):
                 raise ValueError('同一正名出现相互冲突的状态: ' + canonical)
             canonical_status[canonical] = statuses[name]
         references, evidence, reasons_removed = classification_closeout(
-            conn, database, list(rows.values()))
+            conn, database, list(rows.values()), group, table)
         for name, status in canonical_status.items():
             row = next(row for row in rows.values() if row['API名称'] == name)
             if row['是否对外'] != '是':
                 continue
             if status == '支持' and row['是否支持'] != 'API删除，待下线':
-                conn.execute('UPDATE "API支持数据" SET "适配策略"=?,"是否支持"=?,"分类待审核"=? WHERE "API名称"=?',
+                conn.execute(f'UPDATE "{table}" SET "适配策略"=?,"是否支持"=?,"分类待审核"=? WHERE "API名称"=?',
                              (STRATEGIES[status], '支持', '否', name))
             else:
-                conn.execute('UPDATE "API支持数据" SET "适配策略"=?,"分类待审核"=? WHERE "API名称"=?',
+                conn.execute(f'UPDATE "{table}" SET "适配策略"=?,"分类待审核"=? WHERE "API名称"=?',
                              (STRATEGIES[status], '否', name))
         conn.commit()
     for path, text in references.items():
@@ -167,13 +175,14 @@ def finish_merged(database, mapping_path, record_path, record, remote):
             replace_text(path, text)
         else:
             path.unlink(missing_ok=True)
-    latest_mapping = read_object(mapping_path) if mapping_path.exists() else {}
+    groups = grouped_mapping(read_object(mapping_path) if mapping_path.exists() else {})
+    latest_mapping = groups.get(group, {})
     completed_tasks = {'adapt-' + name for name in canonical_status} | {'adapt-' + name for name in statuses}
     removed = [task for task, value in latest_mapping.items()
                if value == branch and task in completed_tasks]
     for task in removed:
         del latest_mapping[task]
-    write_json(mapping_path, latest_mapping)
+    write_json(mapping_path, groups)
     record_path.unlink(missing_ok=True)
     return {'pr': record['number'], 'branch': branch, 'api-status': canonical_status,
             'removed_tasks': removed, 'classification_reasons_removed': reasons_removed,

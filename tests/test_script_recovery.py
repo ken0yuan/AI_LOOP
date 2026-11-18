@@ -253,14 +253,15 @@ class OfflineIntegrationTests(unittest.TestCase):
         (self.root / 'scripts/pytorch_api_diff/extract_docs_crawl.py').write_text('# fixture\n')
         (self.root / 'scripts/scan_documented_apis.py').write_text(SCANNER)
         self.wheels = self.root / 'wheels'; self.wheels.mkdir()
-        subprocess.run([sys.executable, '-m', 'venv', str(self.root / 'venv')], check=True, capture_output=True)
-        self.python = self.root / 'venv/bin/python'
+        venv = Path('data/venv') / ('python-' + sys.version.split()[0])
+        subprocess.run([sys.executable, '-m', 'venv', str(self.root / venv)], check=True, capture_output=True)
+        self.python = self.root / venv / 'bin/python'
         for name, module in [('torch', 'torch'), ('torch-npu', 'torch_npu')]:
             wheel = make_wheel(self.wheels, name, module, '0.0.1')
             subprocess.run([str(self.python), '-m', 'pip', 'install', '--disable-pip-version-check', '--no-index', str(wheel)],
                            check=True, capture_output=True)
         self.basic = self.run / 'basic_information.json'
-        self.basic.write_text(json.dumps({'venv': 'venv'}))
+        self.basic.write_text(json.dumps({'venv': str(venv)}))
         self.defaults = self.root / 'requirements-default.txt'; self.defaults.write_text('# existing defaults\n')
         (self.run / 'requirements.txt').write_text('# task inputs\n')
         self.database = self.root / 'data/api-support.sqlite3'

@@ -10,6 +10,8 @@ import platform
 import re
 import subprocess
 import sys
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from preparation_state import locked, write_json, sha256, target_profile, config_snapshot, ENVIRONMENT, relative_path
 
 try:
@@ -25,17 +27,72 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
 
 
-def merge_requirements(defaults, required, config):
+def nightly_target(version):
+    """Prefer a published release; only unpublished versions can denote nightly."""
+    release = version + '.0'
+    url = f'https://pypi.org/pypi/torch/{release}/json'
+    try:
+        with urlopen(Request(url, headers={'Accept': 'application/json'}), timeout=10) as response:
+            record = json.load(response)
+    except HTTPError as error:
+        error.close()
+        if error.code != 404:
+            raise ValueError(f'Cannot verify torch {release} on PyPI: {error}') from error
+    except (OSError, ValueError) as error:
+        raise ValueError(f'Cannot verify torch {release} on PyPI: {error}') from error
+    else:
+        info = record['info']
+        if info['name'].lower() != 'torch' or info['version'] != release:
+            raise ValueError(f'Unexpected PyPI release record for torch {release}')
+        return False
+
+    request = Request('https://docs.pytorch.org/docs/main/objects.inv',
+                      headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        with urlopen(request, timeout=10) as response:
+            header = [response.readline(256) for _ in range(3)]
+    except OSError as error:
+        raise ValueError(f'Cannot read the PyTorch main documentation version: {error}') from error
+    match = re.match(rb'^# Version: (?:main\s*\()?([0-9]+)\.([0-9]+)\.([0-9]+)(?=[a-zA-Z+\s)]|$)', header[2])
+    if header[1].strip() != b'# Project: PyTorch' or not match:
+        raise ValueError('Missing numeric PyTorch version in main/objects.inv')
+    current = tuple(map(int, match.groups()))
+    requested = tuple(map(int, version.split('.')))
+    if requested == current[:2]:
+        return True
+    raise ValueError(f'torch {release} is absent from PyPI and does not match current nightly '
+                     + '.'.join(map(str, current)))
+
+
+def merge_requirements(defaults, required, config, torch_version=None, nightly=False):
     """Produce one task requirements file; explicit active constraints override defaults."""
-    if not required:
+    if not required and torch_version is None:
         return defaults
     requested = [Requirement(value) for value in required]
     environment = default_environment()
     environment.update(python_version='.'.join(config['python_version'].split('.')[:2]),
                        python_full_version=config['python_version'], sys_platform='linux',
                        os_name='posix', platform_system='Linux', platform_machine=config['architecture'])
+    if torch_version is not None:
+        extras = set()
+        remaining = []
+        for item in requested:
+            if canonicalize_name(item.name) != 'torch':
+                remaining.append(item)
+                continue
+            if item.marker and not item.marker.evaluate(environment):
+                if not nightly:
+                    remaining.append(item)
+                continue
+            if item.url or not item.specifier.contains(torch_version):
+                raise ValueError(f'--torch-version {torch_version} conflicts with --requirement {item}')
+            extras.update(item.extras)
+        suffix = '[' + ','.join(sorted(extras)) + ']' if extras else ''
+        requested = remaining if nightly else [*remaining, Requirement(f'torch{suffix}=={torch_version}')]
     overrides = {canonicalize_name(item.name) for item in requested
                  if item.marker is None or item.marker.evaluate(environment)}
+    if nightly:
+        overrides.add('torch')
     lines = []
     for raw in defaults.decode('utf-8').splitlines():
         line = raw.split(' #', 1)[0].strip()
@@ -44,7 +101,8 @@ def merge_requirements(defaults, required, config):
             if canonicalize_name(item.name) in overrides:
                 continue
         lines.append(raw)
-    lines.extend(['', '# Required dependencies for this task:'])
+    if requested:
+        lines.extend(['', '# Required dependencies for this task:'])
     lines.extend(dict.fromkeys(str(item) for item in requested))
     return ('\n'.join(lines)+'\n').encode('utf-8')
 
@@ -93,26 +151,36 @@ def main(argv=None):
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument('--api', nargs='+', help='One or more API names, in request order')
     inputs.add_argument('--new-apis', action='store_true', help='Adapt APIs newly inserted during this run')
+    parser.add_argument('--torch-version', help='Target PyTorch major.minor for --api, e.g. 2.14')
     parser.add_argument('--run-dir', required=True, type=Path)
     parser.add_argument('--defaults', type=Path, default=ROOT/'api-defaults.json')
     parser.add_argument('--requirement', action='append', default=[],
                         help='Required task dependency, e.g. pytest==8.3.0; may be repeated')
     for field in ('python-version','chip-type','os','architecture'):
         parser.add_argument('--'+field)
-    parser.add_argument('--dry-run', action='store_true', help='Show initial JSON without creating files or accessing the network')
+    parser.add_argument('--dry-run', action='store_true', help='Show initial JSON without creating files; an explicit torch version is checked online')
     args = parser.parse_args(argv)
     try:
         for name in args.api or []:
             if not re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*', name, re.ASCII):
                 raise ValueError('Invalid --api name: ' + name)
         first_api = args.api[0] if args.api else 'new'
+        version = args.torch_version
+        if version is not None:
+            if args.new_apis:
+                raise ValueError('--new-apis follows nightly and cannot take --torch-version')
+            if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', version):
+                raise ValueError('--torch-version requires major.minor, e.g. 2.14')
+        elif any(canonicalize_name(Requirement(item).name) == 'torch' for item in args.requirement):
+            raise ValueError('Select the torch target with --torch-version <major.minor>')
         run_dir = args.run_dir.resolve()
         parent = (DATA/'run_data').resolve()
         if run_dir == parent or not run_dir.is_relative_to(parent):
             raise ValueError('run-dir must be a task directory under AI_LOOP/data/run_data')
-        match = re.fullmatch(re.escape('adapt-'+first_api+'-')+r'(\d{6})', run_dir.name)
+        prefix = f'adapt-{version}-{first_api}-' if version else f'adapt-{first_api}-'
+        match = re.fullmatch(re.escape(prefix)+r'(\d{6})', run_dir.name)
         if not match:
-            raise ValueError('API run-id must be adapt-<first API or new>-<YYMMDD>')
+            raise ValueError(f'Expected run-id: {prefix}<YYMMDD>')
         datetime.strptime(match[1], '%y%m%d')
         config = json.loads(args.defaults.read_text(encoding='utf-8'))
         for key in ENVIRONMENT:
@@ -128,7 +196,8 @@ def main(argv=None):
         if basic_path.exists() or requirements.exists():
             raise ValueError('Run already has business inputs; choose a new run-dir')
         requirements_source = ROOT/'requirements-default.txt'
-        requirements_content = merge_requirements(requirements_source.read_bytes(), args.requirement, config)
+        nightly = nightly_target(version) if version is not None else False
+        requirements_content = merge_requirements(requirements_source.read_bytes(), args.requirement, config, version, nightly)
         runtime = collect_runtime_environment()
         if args.chip_type is not None and args.chip_type != runtime['chip_type']:
             raise ValueError('--chip-type does not match detected hardware: ' + runtime['chip_type'])
@@ -141,6 +210,8 @@ def main(argv=None):
                  **{k:config[k] for k in ENVIRONMENT},
                  'preparation_status':'BASIC_READY', 'environment_status':'NOT_READY', 'preparation_config':snapshot,
                  'preparation_record':relative_path(record_path, ROOT)}
+        if version is not None:
+            basic['problem-description'] = version + ' ' + basic['problem-description']
         if args.dry_run:
             print(json.dumps(basic,ensure_ascii=False,indent=2))
             return 0

@@ -18,6 +18,7 @@ from api_refresh_runtime import RefreshRecovery, WheelDependencyError
 from api_first_seen import COLUMN as FIRST_SEEN_COLUMN, capture_document_version, read_document_version, stamp_new_apis
 
 ROOT = Path(__file__).resolve().parents[1]
+NIGHTLY_TABLE = 'API支持数据'
 NORMAL_STATES = {'支持', '不支持', '未提供'}
 OFFLINE_STATES = {'API删除，待下线'}
 REMOVAL_MARKERS = OFFLINE_STATES | {'文档删除，待下线'}
@@ -76,6 +77,28 @@ def read_json(path):
 def resolve(path, root):
     path = Path(path)
     return Path(os.path.abspath(path if path.is_absolute() else root / path))
+
+
+def support_table(basic, root):
+    """Use the environment directory recorded by Step 0 as the table selector."""
+    venv = basic.get('venv') if isinstance(basic, dict) else None
+    if not has_value(venv):
+        raise ValueError('basic_information.json must contain the Step 0 venv path')
+    base = Path(root) / 'data/venv'
+    path = resolve(venv, root)
+    if path.is_relative_to(base) and re.fullmatch(r'python-[0-9]+\.[0-9]+(?:\.[0-9]+)?', path.name):
+        if path.parent == base:
+            return NIGHTLY_TABLE
+        if path.parent.parent == base:
+            release = re.fullmatch(r'torch-([0-9]+\.[0-9]+)(?:\.[0-9]+)*(?:\.post[0-9]+)?', path.parent.name)
+            if release:
+                return f'{NIGHTLY_TABLE}_{release[1]}'
+    raise ValueError(f'Unrecognized Step 0 venv path: {venv}')
+
+
+def require_nightly(basic, root):
+    if support_table(basic, root) != NIGHTLY_TABLE:
+        raise ValueError('Fixed-version tasks must go directly to prepare_adapt_information.py')
 
 
 def names_from_document(data):
@@ -363,8 +386,7 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
     root = Path(root).resolve()
     basic_information = resolve(basic_information, root)
     basic = read_json(basic_information)
-    if not isinstance(basic.get('venv'), str) or not basic['venv'].strip():
-        raise ValueError('basic_information.json must contain the Step 0 venv path')
+    require_nightly(basic, root)
     venv = resolve(basic['venv'], root)
     python = venv / 'bin/python'
     if not python.is_file():

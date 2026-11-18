@@ -1,6 +1,7 @@
 <!--
 填写规则：
 标题概括任务与处理对象。正文按以下栏目填写，字段来源见 Step4.1。
+API 任务在标题中写明适配目标（PyTorch nightly 或 PyTorch 加固定版本号）。按 Step 4 的 venv 对照表判断；固定版本取目录中 torch 的主次版本。环境表填写 Step 0 记录的完整包版本，保留 dev、提交号或 +cpu 等已有构建信息。
 api-adaptation 的“补充testcase”任务：标题写明验证哪些 API 在 NPU 上是否受支持；实际情况是支持状态待验证，不预设实现故障。
 此类任务的方案是为指定 API 准备用例并运行 NPU 验证；验收要求每个 API 有实际结果并据此形成支持结论，不要求全部通过。
 原因按已有证据填写；尚未查明填待确认，仅验证支持状态且无已知故障时填不适用。
@@ -11,6 +12,8 @@ api-adaptation 的“补充testcase”任务：标题写明验证哪些 API 在 
 ## 问题概述
 
 {{basic_information.json.problem-description}}
+
+{{API 任务写明本次适配的 PyTorch 目标；其他任务省略本行}}
 
 ## 实际行为与预期行为
 

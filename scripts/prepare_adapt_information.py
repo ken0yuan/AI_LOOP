@@ -9,8 +9,9 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+from branch_mapping import branch_group, grouped_mapping
 
-from refresh_api_support_db import ROOT, match_api_name, read_json, resolve, stage_output
+from refresh_api_support_db import NIGHTLY_TABLE, ROOT, match_api_name, read_json, resolve, stage_output, support_table
 
 TOKENS = re.compile(r'(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*')
 QUOTED_API = re.compile(r'`\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*`')
@@ -51,6 +52,10 @@ def prepare(basic_information, database=None, *, root=ROOT):
     description = basic.get('problem-description') if isinstance(basic, dict) else None
     if not isinstance(description, str) or not description.strip():
         raise ValueError('basic_information.json requires a nonempty problem-description')
+    table = support_table(basic, root)
+    new_apis = description.strip() == 'New API needs adaptation'
+    if new_apis and table != NIGHTLY_TABLE:
+        raise ValueError(f'{table}: fixed-version tasks require explicit API names')
     database = resolve(database or 'data/api-support.sqlite3', root)
     if not database.is_file():
         raise ValueError(f'Existing API database missing: {database}')
@@ -59,18 +64,20 @@ def prepare(basic_information, database=None, *, root=ROOT):
         raise ValueError('adapt-information.json must be inside this run directory')
     conn = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
     try:
-        columns = {r[1] for r in conn.execute('PRAGMA table_info("API支持数据")')}
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            raise ValueError(f'API support table missing: {table}')
+        columns = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
         needed = {'API名称', '本地是否适配', '是否对外', '是否支持', 'API真正名字', '适配策略'}
         if not needed <= columns:
-            raise ValueError('Database requires API名称, 本地是否适配, 是否对外, 是否支持, API真正名字 and 适配策略')
+            raise ValueError(f'{table}: missing columns: ' + ', '.join(sorted(needed - columns)))
         conn.row_factory = sqlite3.Row
-        records = conn.execute('SELECT * FROM "API支持数据"').fetchall()
+        records = conn.execute(f'SELECT "API名称","本地是否适配","是否对外","是否支持","API真正名字","适配策略" FROM "{table}"').fetchall()
     finally:
         conn.close()
     rows = {row['API名称']: dict(row) for row in records}
     if len(rows) != len(records):
         raise ValueError('API名称 must be unique in the support database')
-    if description.strip() == 'New API needs adaptation':
+    if new_apis:
         names = read_json(basic_path.parent / 'api-refresh/added-apis.json')
         if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
             raise ValueError('added-apis.json must be an API name array from this run refresh')
@@ -79,11 +86,13 @@ def prepare(basic_information, database=None, *, root=ROOT):
             raise ValueError('APIs not registered in database: ' + ', '.join(missing))
         names = list(dict.fromkeys(names))
     else:
-        names = extract_apis(description, rows)
+        try:
+            names = extract_apis(description, rows)
+        except ValueError as error:
+            raise ValueError(f'{table}: {error}') from error
     mapping_path = root / 'data/branch-mapping.json'
-    mapping = read_json(mapping_path) if mapping_path.exists() else {}
-    if not isinstance(mapping, dict):
-        raise ValueError('branch-mapping.json must contain task-to-branch mappings')
+    groups = grouped_mapping(read_json(mapping_path)) if mapping_path.exists() else {}
+    mapping = groups.get(branch_group(basic, root), {})
     existing_tasks = {}
     for task in mapping:
         if not task.startswith('adapt-'):

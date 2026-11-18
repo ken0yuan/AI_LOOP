@@ -37,7 +37,7 @@ python3 -B scripts/dispatch_adaptation_tasks.py \
 ```json
 {
   "task-branches": ["adapt-Tensor.add", "adapt-view"],
-  "development-branch": "adapt-set-a31f92c8d570",
+  "development-branch": "adapt-nightly-set-a31f92c8d570",
   "adapt-plan": {
     "step1": {
       "agentname": "api-adaptation",
