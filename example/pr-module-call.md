@@ -34,6 +34,7 @@
 |---|---|---|---|---|
 | NPU Atlas 910B4 ×8 | `20 passed, 1 warning in 9.29s` | `tests=20 failures=0 errors=0 skipped=0` | 0 | 完整 / 通过 |
 | GPU NVIDIA GeForce RTX 5070 Ti | `20 passed in 2.13s` | `tests=20 failures=0 errors=0 skipped=0` | 0 | 完整 / 通过 |
+| NPU Ascend 950 | 未运行 | 未生成 | 未运行 | 待验证 |
 
 # 【CheckList】
 

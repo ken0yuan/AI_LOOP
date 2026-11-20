@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize merged PR results after Step 0 environment preparation."""
+"""Synchronize merged PR results and list open tracked PRs for review checks."""
 from __future__ import annotations
 
 import argparse
@@ -13,13 +13,15 @@ import subprocess
 import sys
 import tempfile
 
-from preparation_state import locked, write_json
+from preparation_state import locked, write_json, relative_path
+from pr_tracking import file_lock, load_index, receipt_url
 from prepare_development_branch import read_object
 from branch_mapping import grouped_mapping
 from refresh_api_support_db import NIGHTLY_TABLE
 
 ROOT = Path(__file__).resolve().parents[1]
 STRATEGIES = {'补充testcase': '补充testcase', '待适配': '待适配', '支持': '已支持'}
+OPEN_STATES = {'open', 'opened'}
 
 
 def replace_text(path, text):
@@ -106,6 +108,76 @@ def view_pr(record):
     return value
 
 
+def open_review_entry(path, record, remote, root):
+    """Describe an identity-verified open PR whose review comments need checking.
+
+    Keep both SHAs so the agent can reconcile later changes before editing.
+    """
+    head, base = remote['head'], remote['base']
+    if (int(remote['number']) != int(record['number'])
+            or base['ref'] != record.get('base', 'master')
+            or head['ref'] != record['head']
+            or head['repo']['full_name'].lower() != record['fork'].lower()
+            or base['repo']['full_name'].lower() != record['repository'].lower()):
+        raise ValueError('开放PR来源或目标与本地发布记录不一致')
+    commit = record.get('commit')
+    return {'run_id': path.parent.name,
+            'run_dir': relative_path(path.parent, root),
+            'pr_record': relative_path(path, root),
+            'pr': int(record['number']), 'repository': record['repository'],
+            'fork': record['fork'], 'branch': head['ref'],
+            'commit': commit, 'head_sha': head['sha'],
+            'head_updated': bool(commit and head['sha'] != commit)}
+
+
+def read_review_comments(path, *, root=ROOT):
+    """Save one complete GitCode discussion snapshot in the PR's run directory."""
+    path = (root / path).resolve()
+    if path.name != 'pr.json' or path.parent.parent != (root / 'data/run_data').resolve():
+        raise ValueError('采集评审需要本批 data/run_data/<run-id>/pr.json')
+    record = read_object(path)
+    remote = view_pr(record)
+    if remote.get('merged') or remote.get('state') not in OPEN_STATES:
+        return {'status': 'PR_NO_LONGER_OPEN', 'complete': True, 'review_file': None, 'candidate_count': 0}
+    entry = open_review_entry(path, record, remote, root)
+    ledger = path.with_name('review-handling.json')
+    handling = read_object(ledger) if ledger.exists() else {}
+    processed = {(str(item['id']), item['updated_at']) for item in handling.get('processed', [])}
+    sent_replies = {str(item['reply_id']) for key in ('processed', 'needs-confirmation')
+                    for item in handling.get(key, []) if item.get('reply_id') is not None}
+    endpoint = f"repos/{entry['repository']}/pulls/{entry['pr']}/comments"
+    page = 1
+    discussions = []
+    seen = set()
+    while True:
+        raw = subprocess.check_output(['gitcode', 'api', f'{endpoint}?page={page}&per_page=100&direction=asc'],
+                                      encoding='utf-8', timeout=90)
+        comments = json.loads(raw)
+        if not isinstance(comments, list):
+            raise ValueError('PR评论响应应为列表')
+        new_ids = {str(note['id']) for note in comments} - seen
+        if comments and not new_ids:
+            raise ValueError('PR评论分页未前进，请重试')
+        for note in comments:
+            if str(note['id']) in seen:
+                continue
+            seen.add(str(note['id']))
+            ids = []
+            if note.get('resolved') is not True:
+                ids = [msg['id'] for msg in (note, *(note.get('reply') or []))
+                       if str(msg['id']) not in sent_replies
+                       and (str(msg['id']), msg['updated_at']) not in processed]
+            discussions.append({'candidate_ids': ids, 'discussion': note})
+        if len(comments) < 100:
+            break
+        page += 1
+    review_file = path.with_name('pr-review-comments.json')
+    write_json(review_file, {**entry, 'pr_url': receipt_url(record), 'discussions': discussions})
+    return {'status': 'PR_REVIEW_COMMENTS_READY', 'complete': True, **entry,
+            'review_file': relative_path(review_file, root), 'discussion_count': len(discussions),
+            'candidate_count': sum(len(thread['candidate_ids']) for thread in discussions)}
+
+
 def resolve_rows(conn, names, table):
     rows = {}
     for name in names:
@@ -183,48 +255,73 @@ def finish_merged(database, mapping_path, record_path, record, remote):
     for task in removed:
         del latest_mapping[task]
     write_json(mapping_path, groups)
-    record_path.unlink(missing_ok=True)
+    write_json(record_path, dict(record, **{'cleanup-completed': True}))
     return {'pr': record['number'], 'branch': branch, 'api-status': canonical_status,
             'removed_tasks': removed, 'classification_reasons_removed': reasons_removed,
             'status': 'MERGED_PR_RECONCILED'}
 
 
-def reconcile(basic_information, *, root=ROOT, viewer=view_pr):
+def reconcile(*, root=ROOT, viewer=view_pr):
     root = Path(root).resolve()
-    basic_path = Path(basic_information)
-    if not basic_path.is_absolute():
-        basic_path = root / basic_path
-    read_object(basic_path)
     database = root / 'data/api-support.sqlite3'
     mapping = root / 'data/branch-mapping.json'
-    done, pending = [], []
-    with locked(root / 'data/source_code/.torchnpu-source.lock'):
-        for path in sorted((root / 'data/run_data').glob('*/pr.json')):
-            record = read_object(path)
-            if record.get('cleanup-completed') is True:
+    done, pending, open_reviews = [], [], []
+    data = root / 'data'
+    with locked(data / 'source_code/.torchnpu-source.lock'), file_lock(data / '.pr-tracking.lock', wait=True):
+        index = load_index(data)
+        updated = [entry.copy() for entry in index.values()]
+        for current in updated:
+            if current['pr_status'] == 'merged':
                 continue
+            path = root / current['run_data'] / 'pr.json'
             try:
+                record = read_object(path)
+                if receipt_url(record).lower() != current['pr_url'].lower():
+                    raise ValueError('PR索引与批次发布记录不一致')
+                if record.get('cleanup-completed') is True:
+                    current['pr_status'] = 'merged'
+                    continue
                 remote = viewer(record)
+                if int(remote['number']) != int(record['number']):
+                    raise ValueError('远端PR编号与发布记录不一致')
                 if remote.get('merged') is True:
+                    if current['pr_status'] != 'merged_pending':
+                        current['pr_status'] = 'merged_pending'
+                        write_json(data / 'pr-tracking.json', updated)
                     done.append(finish_merged(database, mapping, path, record, remote))
+                    current['pr_status'] = 'merged'
+                elif current['pr_status'] == 'merged_pending':
+                    raise ValueError('已确认合入的PR与远端状态不一致')
+                elif remote.get('state') in OPEN_STATES:
+                    open_reviews.append(open_review_entry(path, record, remote, root))
+                    current['pr_status'] = 'open'
+                elif remote.get('state') == 'closed':
+                    current['pr_status'] = 'closed'
+                else:
+                    raise ValueError('无法识别远端PR状态')
             except (ValueError, KeyError, TypeError, OSError, RuntimeError, sqlite3.Error) as error:
                 pending.append({'pr_record': str(path), 'reason': str(error)})
+        if updated != list(index.values()):
+            write_json(data / 'pr-tracking.json', updated)
     # Upstream testcase matching is deferred; default to no matches.
     overlaps = []
     if pending:
         return {'status': 'PR_RECONCILIATION_INCOMPLETE', 'complete': False,
-                'merged': done, 'pending': pending, 'upstream_test_overlaps': overlaps,
-                'message': '先处理未完成的PR状态同步，再进入Step1。'}
+                'merged': done, 'pending': pending, 'open_pr_reviews': open_reviews,
+                'upstream_test_overlaps': overlaps,
+                'message': '部分PR状态同步未完成，详见pending。'}
     return {'status': 'PR_RECONCILIATION_READY', 'complete': True, 'merged': done,
-            'pending': [], 'upstream_test_overlaps': []}
+            'pending': [], 'open_pr_reviews': open_reviews, 'upstream_test_overlaps': [],
+            'message': 'PR状态同步完成。'}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--basic-information', required=True, type=Path)
+    parser.add_argument('--review-comments', type=Path, metavar='PR_JSON', help='将该 PR 的评审讨论保存到原批次目录')
     args = parser.parse_args()
     try:
-        result = reconcile(args.basic_information)
+        result = (read_review_comments(args.review_comments) if args.review_comments
+                  else reconcile())
     except Exception as error:
         print(json.dumps({'status': 'PR_RECONCILIATION_FAILED', 'error': str(error)}, ensure_ascii=False), file=sys.stderr)
         return 1

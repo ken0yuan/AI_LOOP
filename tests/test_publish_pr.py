@@ -129,6 +129,21 @@ class SharedIssuePublication(unittest.TestCase):
         pub.publish(self.args)
         self.assertEqual(self.writes, [("edit", 20)])
 
+    def test_managed_run_registers_once_on_publish_and_update(self):
+        data = self.run_dir.parent / "data"
+        (data / "run_data").mkdir(parents=True)
+        original = self.run_dir
+        self.run_dir = data / "run_data" / original.name
+        original.rename(self.run_dir)
+        self.args.run_dir = self.args.source = self.run_dir
+        self.sibling(head="batch-a", number=10)
+        url = pub.publish(self.args)
+        (self.run_dir / "pr-title.txt").write_text("revised title")
+        self.assertEqual(pub.publish(self.args), url)
+        self.assertEqual(json.loads((data / "pr-tracking.json").read_text()), [
+            {"pr_url": pr(10)["html_url"], "run_data": "data/run_data/batch-a", "pr_status": "unknown"},
+            {"pr_url": url, "run_data": "data/run_data/batch-b", "pr_status": "open"}])
+
     def test_discover_existing_pr_without_saved_number(self):
         self.prs[20] = pr(20)
         pub.publish(self.args)

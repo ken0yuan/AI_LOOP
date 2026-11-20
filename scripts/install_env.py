@@ -171,6 +171,19 @@ def finish_environment(basic_path, venv, process_env, cann):
         env_lines.append('export LD_LIBRARY_PATH=' + shlex.quote(process_env['LD_LIBRARY_PATH']))
     env_lines += ['unset PYTHONPATH', 'export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0',
                   'source ' + shlex.quote(str(venv / 'bin/activate'))]
+    inductor_dir = venv / 'npu-inductor'
+    if (inductor_dir / 'packages').is_dir():
+        env_lines += [
+            '# --- NPU Inductor integration (triton-ascend), persistent; activate when present ---',
+            '_npu_inductor_dir=' + shlex.quote(str(inductor_dir)),
+            'if [ -d "$_npu_inductor_dir/packages" ]; then',
+            '  export PYTHONPATH="$_npu_inductor_dir/packages:$_npu_inductor_dir/minimal-deps${PYTHONPATH:+:$PYTHONPATH}"',
+            '  export TORCH_NPU_DEVICE_CAPABILITY=8.0',
+            '  export TRITON_CACHE_DIR="$_npu_inductor_dir/cache/triton"',
+            '  export TORCHINDUCTOR_CACHE_DIR="$_npu_inductor_dir/cache/inductor"',
+            'fi',
+            'unset _npu_inductor_dir',
+        ]
     (venv / 'env.sh').write_text('\n'.join(env_lines) + '\n', encoding='utf-8')
     set_environment_state(basic_path, 'ENV_READY',
         python=relative_path(venv/'bin/python', ROOT), venv=relative_path(venv, ROOT),

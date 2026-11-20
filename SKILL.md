@@ -7,7 +7,9 @@ description: 按既定步骤编排 PyTorch API 的 NPU 适配准备、分支管�
 
 接收适配需求，准备环境与API数据，安排开发任务，并跟踪issue、PR及合入后的收尾。
 
-按以下顺序执行，完成当前步骤后，根据返回状态继续或结束。用户指定的跳过阶段和任务终点优先。
+定时触发 PR 跟踪时，直接按 [Step 0.1 的定时入口](steps/step0.1-pr_reconciliation.md)执行合入收尾和开放 PR 评审，本轮在该步骤结束。
+
+常规适配任务按以下顺序执行，完成当前步骤后，根据返回状态继续或结束。用户指定的跳过阶段和任务终点优先。
 
 1. [Step 0：获取问题并准备环境](steps/step0-fetch_problems.md)
 2. [Step 0.1：同步PR与开发记录](steps/step0.1-pr_reconciliation.md)

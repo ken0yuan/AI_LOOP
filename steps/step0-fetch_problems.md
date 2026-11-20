@@ -147,6 +147,7 @@ UTF-8 JSON对象，由准备、源码、wheel和安装脚本依次补写。复�
 | `pytorch_wheel` | 本次选定的具体文件，如`data/wheels/torch-<版本>-<标签>.whl` |
 | `torch_npu_version` | 本次实际使用的 torch-npu 版本 |
 | `torch_npu_wheel` | 本次选定的具体文件，如`data/wheels/torch_npu-<版本>-<标签>.whl` |
+| `last-torchnpu-wheel` | 本批最新的 torch-npu wheel 路径。初值与 `torch_npu_wheel` 相同，源码重新构建成功后由构建方更新；原始包路径另存于 `torch_npu_wheel`。 |
 | `torch_npu_commit` | 本次torch-npu源码对应的提交，由配套wheel取得，用于定位本次源码版本 |
 | `preparation_status` | 当前准备状态；源码和wheel补齐后为`INPUTS_READY` |
 | `environment_status` | 环境状态：`NOT_READY`、`INSTALLING`、`ENV_READY`或`FAILED` |

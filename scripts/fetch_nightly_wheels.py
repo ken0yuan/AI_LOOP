@@ -318,9 +318,6 @@ def fetch_for_task(args):
                 print(json.dumps({'basic_information':task_state.relative_path(path, ROOT),'selection':selection,'sources':{k:config[k] for k in ('pytorch_repo','torch_npu_repo')}},ensure_ascii=False,indent=2))
                 return 0
             phase='sources'
-            basic=dict(basic)
-            for field in task_state.WHEEL_FIELDS:
-                if field in basic: basic[field]=None
             basic=source_fetch.complete_sources(path,basic,data_root=args.data_root,downloader=downloader,selection=selection)
             phase='wheels'
             wheels = download_wheels(selection,downloader,config,data_root=args.data_root)

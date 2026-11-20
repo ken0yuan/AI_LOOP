@@ -36,7 +36,7 @@ def relative_metadata(value, root):
     """Keep project paths portable while leaving URLs and identities intact."""
     path_keys = {'path', 'archive', 'preparation_record', 'defaults_path',
                  'requirements_defaults_path', 'pytorch_source', 'torch_npu_latest_source',
-                 'pytorch_wheel', 'torch_npu_wheel', 'torch_npu_source', 'basic_information', 'bin',
+                 'pytorch_wheel', 'torch_npu_wheel', 'last-torchnpu-wheel', 'torch_npu_source', 'basic_information', 'bin',
                  'npu_smi_log', 'cann_version_file'}
     if isinstance(value, dict):
         return {key: relative_path(item, root) if key in path_keys and isinstance(item, str)
@@ -176,6 +176,10 @@ def state(basic, *, fixed_release=False):
 def publish(path, basic, updates, record_updates, *, root=None):
     root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
     updated = dict(basic, **updates)
+    # Follow the initial wheel until this batch records a build of its own.
+    last = basic.get('last-torchnpu-wheel')
+    if 'torch_npu_wheel' in updates and (not last or last == basic.get('torch_npu_wheel')):
+        updated['last-torchnpu-wheel'] = updates['torch_npu_wheel']
     updated.pop('api_names', None)
     updated = reset_environment(updated)
     updated = relative_metadata(updated, root)

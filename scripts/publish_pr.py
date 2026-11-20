@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Publish the reviewed AI_LOOP commit and PR text to GitCode. Python 3.9+."""
 import argparse
-from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -9,7 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
+
+from pr_tracking import file_lock, register_receipt, save
 
 
 class PublishError(Exception):
@@ -27,35 +27,10 @@ def read(path):
     return value
 
 
-def save(path, value):
-    fd, name = tempfile.mkstemp(dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
-
-
-@contextmanager
 def issue_lock(run, issue):
     # All runs under this run_data share this issue lock; the OS releases it on exit.
     path = run.parent / (".publish-" + hashlib.sha256(issue.encode()).hexdigest() + ".lock")
-    with path.open("a+b") as handle:
-        if os.name == "nt":
-            import msvcrt
-            if path.stat().st_size == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+    return file_lock(path)
 
 
 def invoke(*args, check=True, timeout=90, stdin=None):
@@ -347,7 +322,7 @@ def publish(args):
         receipt.update({"status": "created", "number": int(pr["number"]), "url": url, "commit": code,
                         "remote-sha": code, "run-id": run.name, "verification": str(args.verification),
                         "api-status": owned_status(adapt)})
-        save(record_path, receipt)
+        register_receipt(run, receipt)
         return url
 
 

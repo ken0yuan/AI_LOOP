@@ -1,45 +1,46 @@
-# Step 0.1：同步PR与开发记录
+# Step 0.1 同步 PR 与开发记录
 
-每次运行完成Step 0的源码、安装包和环境准备后，同步已合入PR的适配结果，再进入Step 1。沿用Step 0已拉取的`upstream/master`。
-
-从AI_LOOP根目录执行：
+## 第一步 同步 PR 状态
 
 ```bash
-python3 -B scripts/reconcile_prs.py \
-  --basic-information data/run_data/<run-id>/basic_information.json
+python3 -B scripts/reconcile_prs.py
 ```
 
-## 第一步：同步已合入PR
+在 AI_LOOP 根目录执行。主流程在每次 Step 0 完成后执行一次，定时任务直接从这里开始。脚本读取 `data/pr-tracking.json`，返回本轮已收尾的 `merged`、仍需重试的 `pending` 和已核实的开放 PR 清单 `open_pr_reviews`。
 
-[Step 4.2](step4.2-create_pr.md)创建或更新PR后，由执行发布的主agent在本次运行目录保存`pr.json`，记录PR所在仓库、编号、来源分支和提交，以及该PR负责的API状态。这里读取已有运行目录中的这些发布记录，查询对应PR是否合入。
+脚本按以下顺序同步。
 
-逐API状态由api-adaptation写入`adapt-information.json`的`api-status`，Step 4.2发布时复制到`pr.json`。旧发布记录没有这份快照时，读取同一运行目录的逐API状态。
+1. **核对 PR 状态。** 索引中已标为 `merged` 的条目直接跳过。其余条目按 `run_data` 找到本批 `pr.json` 核对身份，刷新开放或关闭状态。首次创建索引时从已有发布记录补登。
+2. **回填已合入 PR。** 确认合入后先记为 `merged_pending`。核对来源仓库、目标仓库、分支和提交后，从 `pr.json` 取发布时的 `api-status` 快照。旧记录缺少快照时读同批 `adapt-information.json`。按来源分支选表，固定版本使用对应版本表（如 `API支持数据_2.15`），nightly 和旧分支使用 `API支持数据`。在该表定位本 PR 负责的对外 API 正名，按下表写入并将 `分类待审核` 设为 `否`。
 
-确认PR已合入，且来源仓库、分支和提交与发布记录一致后，按顺序处理：
+   | 发布时的 API 状态 | 适配策略 | 是否支持 |
+   |---|---|---|
+   | 支持 | 已支持 | 支持，已有“API删除，待下线”则保留 |
+   | 待适配 | 待适配 | 保留原值 |
+   | 补充testcase | 补充testcase | 保留原值 |
 
-1. **回填适配结果。** 按该 PR 的来源分支选表：固定版本（如 `adapt-2.15-set-…`）用 `API支持数据_2.15`，nightly 和旧分支用 `API支持数据`。在同一张表解析别名、定位公开正名并按下表更新。目标表或 API 缺失时保留 PR 记录待重试。
-2. **完成分类审核收尾。** 将本批正名的`分类待审核`改为`否`。固定版本沿用存量表已有分类。nightly 使用了已批准的新分类时，将定义补入对应的`references/api-classification/`文件；相关新定义仍待审核时，先完成审核。
-3. **清理 nightly 分类理由。** nightly PR 从 `data/api-classification/classification-evidence.jsonl` 清理本批 API 的理由，保留其他条目。固定版本跳过此步。
-4. **清理开发记录。** 从`branch-mapping.json`中该PR自己的版本分组移除已处理API的对应记录，再删除本地的`pr.json`跟踪文件。本地分支、origin分支和上游已合入PR均保留。
+3. **完成收尾。** nightly 将已批准的新分类写入对应的 `references/api-classification/` 文件，并从 `classification-evidence.jsonl` 清理本批 API 的分类理由。相关新定义仍待审核时保留待办。固定版本沿用已有分类。从 `branch-mapping.json` 对应版本分组移除本 PR 已处理的任务映射。全部成功后，在原 `pr.json` 写入 `cleanup-completed: true`，再把索引改为 `merged`，保留索引项和批次文件。若上轮已写入完成标记，本轮只补齐索引状态。
 
-| 发布时的API状态 | 合入后回填正名行 |
-|---|---|
-| 支持 | `适配策略=已支持`，`是否支持=支持` |
-| 待适配 | `适配策略=待适配`，保留支持结论 |
-| 补充testcase | 保留该补测策略 |
+**拿到同步结果后，由调用方决定下一步。**
 
-别名业务字段和对内条目保持原样，`API删除，待下线`的支持状态保持下线。只处理本PR负责的API，其他任务的记录保持原样。
+| 脚本结果 | AI_LOOP 主流程 | 定时任务 |
+|---|---|---|
+| 退出码 0，`complete=true` | 直接进入 [Step 1](step1-analysis_requirements.md) | 按第二步采集 `open_pr_reviews`，清单为空则结束本轮 |
+| 退出码 2，`complete=false` | 处理 `pending` 并重跑，同步成功后进入 Step 1 | 采集清单中已核实的开放 PR，报告 `pending` 供重试 |
+| 退出码 1，执行失败 | 根据错误原因处理后重跑 | 报告错误并重试 |
 
-缺少API状态或同步失败时，保留PR跟踪记录，处理后重跑。尚未合入的PR留待下次同步。
+## 第二步 生成每个 PR 的评审记录
 
-## 第二步：检查上游是否已补测试（待做）
+**仅定时任务执行本步。** 常规 AI_LOOP 在第一步同步成功后即结束 Step 0.1，直接进入 [Step 1](step1-analysis_requirements.md)。定时任务按 `open_pr_reviews` 遍历开放 PR，对每一项取其 `pr_record` 作为 `PR_RECORD`，执行：
 
-后续从`branch-mapping.json`中的API出发，逐个检查上游是否已有对应测试用例。目前默认未找到，直接继续。
+```bash
+python3 -B scripts/reconcile_prs.py --review-comments "$PR_RECORD"
+```
 
-## 完成条件
+脚本分页读取该 PR 的普通评论、行内评论和回复，在其原批次目录生成 `pr-review-comments.json`。每个讨论保留平台返回的原文、作者、评论 ID、更新时间、讨论串 ID、解决状态及已有的文件和行号。文件同时记录 PR 身份、发布提交和采集时的远端提交。`candidate_ids` 标出仍需 Step 5 判断的留言版本，人工留言与机器人留言一并交给 Step 5 按内容处理。已解决、已处理的留言和本流程已登记的答复仍保留在讨论上下文中。
 
-| 返回结果 | 下一步 |
-|---|---|
-| `PR_RECONCILIATION_READY`、`complete=true` | 进入[Step 1](step1-analysis_requirements.md) |
-| `PR_RECONCILIATION_INCOMPLETE`、退出码2 | 处理返回的事项后重跑本步 |
-| 查询或执行失败、退出码1 | 根据错误原因处理后重跑本步 |
+脚本返回文件路径 `review_file` 和候选数 `candidate_count`。开放 PR 即使没有评论也生成一份空清单；只有全部分页读取成功才替换上次记录。读取失败的 PR 报告后留待重试，已关闭或已合入的 PR 结束采集。
+
+本轮先完成各 PR 的采集，再从成功生成的文件中，把有候选意见或有修复、答复、AI 检视、审批及合入待跟踪的开放批次逐份交给 [Step 5](step5-pr_tracking&branch_management.md)。本轮办理过具体意见、发布修复或触发 AI 检视的 PR 在此轮结束处理。后续独立轮次按 Step 5 第五步核对上轮完成记录与当前仍有效的审批，再决定是否发送合入命令；已发则跟踪平台结果。调度器用 `data/.pr-review-cycle.lock` 覆盖采集和后续处理，避免定时轮次重叠。
+
+上游测试匹配尚待实现，当前 `upstream_test_overlaps` 为空。

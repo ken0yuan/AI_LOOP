@@ -61,4 +61,6 @@
 
 核对设备型号、受限调用和原始报告：运行时给出的明确型号限制，或与实测设备、软件版本和调用对应的支持范围说明，可作为证据。在 PR 中分别列明通过项与受限项，沿用真实的逐 API 状态。已确认的平台限制无需等待适配实现或支持该场景的设备复测。满足上述条件后，执行[Step 4.2：提交PR](step4.2-create_pr.md)。传入第一步的issue、问题分析、实际方案、各agent开发结果和测试记录的文件路径，以及本次源码和分支上下文；一份交接报告或多份文件均可。主agent按目标仓PR模板汇总，逐栏对照真实材料与代码，缺少完成证据或必要测试记录时先返回补充。正文核实后统一commit、push并创建或更新PR，关联第一步的issue，再将结果交给Step 5。
 
+给 Step 5 留下本批最后一次完成适配并验收时的恢复依据。子代理每次成功重编 torch-npu wheel 后，用 `scripts/task_torchnpu_wheel.py --basic-information <本批基础信息> --built-wheel <本次产出的.whl>` 更新本批 `last-torchnpu-wheel`。交接时对照最后的验证记录核实使用的包。发布提交和验证入口分别由 `pr.json` 的 `commit`、`verification` 指向；原计划项和子代理见 `adapt-information.json`。核对验收时的解释器、venv、实际 torch/torch-npu 构建、源码提交及设备环境。若最终环境与 `basic_information.json` 的准备记录有差异，将实际值、依赖或安装包来源和对应报告路径补记在本批 `step4-environment.json`，供恢复时优先使用。
+
 其他未完成项或验证阻塞仍按原流程处理；subagent不独立提交issue或PR。
