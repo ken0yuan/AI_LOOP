@@ -354,6 +354,10 @@ def prepare(basic_information, *, root=ROOT):
         if Path(git(repo, 'rev-parse', '--show-toplevel').stdout.strip()).resolve() != repo:
             raise ValueError('Source path is not the repository root')
         adapt = read_object(path)
+        if adapt.get('withdrawing-api'):
+            raise ValueError('Resume the incomplete API withdrawal first')
+        if adapt.get('withdrawn-apis') and adapt.get('task-branches') == []:
+            return {'status': 'NO_ADAPTATION_REQUIRED', 'task-branches': []}
         request = validate_request(adapt)
         adapt['task-branches'] = list(request)
         group = branch_group(basic, root)

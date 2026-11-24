@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Publish the reviewed AI_LOOP commit and PR text to GitCode. Python 3.9+."""
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -8,6 +9,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
+
+from render_gpu_result import unittest_gpu_evidence
+from pr_body_format import api_template, validate_api_body
 
 from pr_tracking import file_lock, register_receipt, save
 
@@ -163,6 +168,31 @@ def ref_sha(repo, push_url, branch):
     return value
 
 
+def check_single_commit(repo, base_sha, code):
+    commits = git(repo, "rev-list", "--max-count=2", "--parents", f"{base_sha}..{code}").stdout.splitlines()
+    require(len(commits) == 1 and len(commits[0].split()) == 2 and commits[0].split()[0] == code,
+            "The PR must contain exactly one non-merge commit. Consolidate the task branch before review.")
+
+
+def push_reviewed(repo, url, branch, code, pr, expected):
+    ref = f"refs/heads/{branch}"
+    remote = ref_sha(repo, url, branch)
+    if expected is not None:
+        require(pr and re.fullmatch("[0-9a-f]{40}", expected),
+                "--expected-head must identify the original full SHA of an existing PR.")
+    if remote == code:
+        return
+    options = []
+    if pr:
+        require(expected and remote == expected and pr["head"]["sha"] == expected,
+                "PR head differs from the pre-edit SHA or --expected-head is missing. Reconcile before updating.")
+        options = [f"--force-with-lease={ref}:{expected}"]
+    elif remote is None:
+        options = [f"--force-with-lease={ref}:"]
+    git(repo, "-c", "push.followTags=false", "-c", "remote.origin.mirror=false", "push",
+        *options, "origin", f"{code}:{ref}")
+
+
 def owned_status(adapt):
     statuses = adapt.get("api-status", {})
     require(isinstance(statuses, dict), "Invalid api-status in adapt-information.json.")
@@ -171,6 +201,98 @@ def owned_status(adapt):
         return statuses
     return {key: value for key, value in statuses.items()
             if key in tasks or "adapt-" + key in tasks}
+
+
+def check_gpu_evidence(run, repo, code, verification, changed_paths, body):
+    """Compare API test evidence with Git blobs before publishing any remote change."""
+    supplemental = {p for p in changed_paths if p.startswith("test/api_supplement/")
+                    and Path(p).match("test_*.py")}
+    if not supplemental and verification != (run / "api-loop/result.json").resolve():
+        return
+    handoff = read(verification) if verification.suffix.lower() == ".json" else {}
+    entries = handoff.get("results", [])
+    if not supplemental and not any("test_files" in e for e in entries):
+        return
+
+    @lru_cache(maxsize=None)
+    def digest(path):
+        proc = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", f"{code}:{path}"],
+                              capture_output=True, timeout=90)
+        require(proc.returncode == 0, f"Cannot read reviewed file {path} at {code}.")
+        return hashlib.sha256(proc.stdout).hexdigest()
+
+    @lru_cache(maxsize=None)
+    def load_report(path):
+        return read(path)
+
+    @lru_cache(maxsize=None)
+    def unittest_proof(path, helpers):
+        return unittest_gpu_evidence(path, load_report(path), repo, helpers)[0]
+
+    @lru_cache(maxsize=None)
+    def manifest_files(path, expected_hash):
+        if not path.is_file():
+            return {}
+        raw = path.read_bytes()
+        return json.loads(raw).get("files", {}) if hashlib.sha256(raw).hexdigest() == expected_hash else {}
+
+    paths = set(supplemental)
+    for entry in entries:
+        paths.update(entry.get("test_files", []))
+        paths.update(((entry.get("device_validation") or {}).get("npu") or {}).get("handoff_files", {}))
+    if not paths:
+        return
+    retained = set(git(repo, "--literal-pathspecs", "ls-tree", "-rz", "--name-only", code,
+                       "--", *sorted(paths)).stdout.split("\0"))
+    unlisted = supplemental & retained
+    missing = set()
+    for entry in entries:
+        tests = set(entry.get("test_files", [])) & retained
+        if not tests:
+            continue
+        unlisted.difference_update(tests)
+        devices = entry.get("device_validation", {})
+        cuda = devices.get("cuda") or {}
+        report_path = run / (cuda.get("report") or "")
+        report = load_report(report_path) if report_path.is_file() and report_path.suffix == ".json" else {}
+        helpers = set((devices.get("npu") or {}).get("handoff_files", {})) - set(entry.get("test_files", []))
+        if report.get("device_kind") == "GPU":
+            proof = unittest_proof(report_path, frozenset(helpers))
+            if proof["helper_files"] - retained:
+                retained.update(git(repo, "--literal-pathspecs", "ls-tree", "-rz", "--name-only", code,
+                                    "--", *sorted(proof["helper_files"] - retained)).stdout.split("\0"))
+            helpers = helpers | proof["helper_files"]
+            files = {f: proof["file_hashes"].get(f) for f in proof["verified_files"]}
+            if (cuda.get("execution") in {"blocked", "not_run"} or
+                    (cuda.get("head_sha") and proof["head_sha"] != cuda["head_sha"]) or
+                    (cuda.get("run_id") and proof.get("run_id") and str(proof["run_id"]) != str(cuda["run_id"])) or
+                    any(p not in retained or proof["file_hashes"].get(p) != digest(p) for p in helpers)):
+                files = {}
+        else:
+            api = cuda.get("api") or entry.get("api")
+            evidence = next((item for item in report.get("results", []) if item.get("api") == api), {})
+            if (report.get("device") != "cuda" or cuda.get("execution") in {"blocked", "not_run"}
+                    or (cuda.get("run_id") and str(cuda["run_id"]) != str(report.get("run_id")))):
+                evidence = {}
+            files = {f["file"]: f.get("sha256") for f in evidence.get("files", [])
+                     if f.get("execution") in {"pass", "partial", "fail", "skip"}}
+            if helpers:
+                manifest = manifest_files(report_path.parent.parent / "manifest.json", report.get("manifest_sha256"))
+                if any(p not in retained or manifest.get(p) != digest(p) for p in helpers):
+                    files = {}
+        missing.update(p for p in tests if files.get(p) != digest(p))
+    missing.update(unlisted)
+    if missing:
+        # Only the final-result cell of a GPU device row can declare partial coverage.
+        gpu_results = []
+        for line in body.splitlines():
+            if line.lstrip().startswith("|"):
+                cells = line.strip().strip("|").split("|")
+                if re.match(r"^(GPU\b|CUDA\b|NVIDIA\b)", cells[0].strip(), re.I):
+                    gpu_results.append(cells[-1])
+        require(any(re.search(r"待验证|待复测|pending|not verified", cell, re.I) for cell in gpu_results),
+                "GPU evidence is missing or stale for: " + ", ".join(sorted(missing))
+                + ". Run api-adaptation Step 1 for the affected files, or mark the GPU result 待验证 with its scope.")
 
 
 def rejected_create(proc, response):
@@ -237,7 +359,11 @@ def publish(args):
     state_path, record_path = run / "publish-state.json", run / "pr.json"
     key = {"repository": upstream, "base": base, "fork": fork, "head": branch, "issue-url": issue_url}
 
-    with issue_lock(run, issue_url.lower()):
+    with issue_lock(run, issue_url.lower()), TemporaryDirectory() as staging:
+        require(adapt == read(run / "adapt-information.json") and not adapt.get("withdrawing-api"),
+                "Task scope changed; finish withdrawal and review the current handoff.")
+        if adapt.get("withdrawn-apis"):
+            require(owned_status(adapt), "No retained API status to publish after withdrawal.")
         for filename in ("publish-state.json", "pr.json"):
             for other in run.parent.glob(f"*/{filename}"):
                 if other.parent == run:
@@ -266,14 +392,26 @@ def publish(args):
             check_relation(upstream, pr["number"], number)
         git(repo, "fetch", "--no-tags", "upstream", f"refs/heads/{base}")
         base_sha = git(repo, "rev-parse", "FETCH_HEAD").stdout.strip()
+        check_single_commit(repo, base_sha, code)
         filenames = set(git(repo, "diff", "--name-only", "-z", "--find-renames",
                             f"{base_sha}...{code}").stdout.rstrip("\0").split("\0"))
         require(filenames != {""}, "Reviewed commit has no changes against the target.")
+        try:
+            template = api_template(run, adapt, basic, verification)
+            if template:
+                upstream_template = git(repo, "show", f"{base_sha}:.gitcode/PULL_REQUEST_TEMPLATE.md", check=False)
+                validate_api_body(body, template, filenames,
+                                  upstream_template.stdout if upstream_template.returncode == 0 else None,
+                                  Path(__file__).resolve().parents[1] / "data/api-support.sqlite3")
+        except ValueError as error:
+            raise PublishError(f"PR 草稿格式错误：{error}") from error
+        # Always send the exact content checked here, even if another process edits the run draft.
+        body_path = Path(staging) / "pr-body.md"
+        body_path.write_bytes(body.encode("utf-8"))
+        check_gpu_evidence(run, repo, code, verification, filenames, body)
         state.update(key, commit=code)
         save(state_path, state)
-        if ref_sha(repo, urls[0], branch) != code:
-            git(repo, "-c", "push.followTags=false", "-c", "remote.origin.mirror=false", "push",
-                "origin", f"{code}:refs/heads/{branch}")
+        push_reviewed(repo, urls[0], branch, code, pr, getattr(args, "expected_head", None))
         require(ref_sha(repo, urls[0], branch) == code, "Remote fork does not point to the reviewed commit.")
         if not pr:
             state["create_pending"] = True
@@ -330,6 +468,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--commit", required=True, help="Full SHA recorded when the development changes were reviewed.")
+    parser.add_argument("--expected-head", help="Full remote PR head SHA verified before starting this update.")
     parser.add_argument("--base", default="master", help="AI_LOOP defaults to master; override for another target.")
     parser.add_argument("--source", type=Path, help="Source checkout if handoff paths moved.")
     parser.add_argument("--verification", type=Path, default=Path("api-loop/result.json"),

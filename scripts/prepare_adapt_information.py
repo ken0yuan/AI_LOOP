@@ -10,6 +10,7 @@ import re
 import sqlite3
 import sys
 from branch_mapping import branch_group, grouped_mapping
+from api_refresh_runtime import locked
 
 from refresh_api_support_db import NIGHTLY_TABLE, ROOT, match_api_name, read_json, resolve, stage_output, support_table
 
@@ -46,6 +47,11 @@ def extract_apis(description, rows):
 
 
 def prepare(basic_information, database=None, *, root=ROOT):
+    with locked(Path(root) / 'data/source_code/.torchnpu-source.lock'):
+        return _prepare(basic_information, database, root=root)
+
+
+def _prepare(basic_information, database, *, root):
     root = Path(root).resolve()
     basic_path = resolve(basic_information, root)
     basic = read_json(basic_path)
@@ -104,6 +110,12 @@ def prepare(basic_information, database=None, *, root=ROOT):
         if mapped_row['是否对外'] == '是' and mapped_row['是否支持'] != 'API删除，待下线':
             existing_tasks.setdefault(mapped_row['API真正名字'] or mapped_name, task)
     branches, skipped, reasons, resolved = [], [], {}, {}
+    result = read_json(output) if output.exists() else {}
+    if not isinstance(result, dict):
+        raise ValueError('Existing adapt-information.json must be a JSON object')
+    if result.get('withdrawing-api'):
+        raise ValueError('Resume the incomplete API withdrawal first')
+    withdrawn = set(result.get('withdrawn-apis', []))
     unavailable = False
     for name in names:
         row = rows[name]
@@ -113,6 +125,10 @@ def prepare(basic_information, database=None, *, root=ROOT):
             unavailable = True
             continue
         target = row['API真正名字'] or name
+        if name in withdrawn or target in withdrawn:
+            skipped.append(name)
+            reasons[name] = '本批已撤回'
+            continue
         representative = rows.get(target)
         if representative is None or representative['API真正名字']:
             raise ValueError(f'{name}: invalid API真正名字; repair the representative relationship')
@@ -140,9 +156,6 @@ def prepare(basic_information, database=None, *, root=ROOT):
                'resolved_apis': resolved}
     if not branches and not output.exists():
         return {'status': 'NO_ADAPTATION_REQUIRED', **summary}
-    result = read_json(output) if output.exists() else {}
-    if not isinstance(result, dict):
-        raise ValueError('Existing adapt-information.json must be a JSON object')
     previous = result.get('git-control')
     original_request = (previous.get('requested-branches') if isinstance(previous, dict)
                         and previous.get('workflow-version') == 2 else None)

@@ -37,6 +37,8 @@ def dispatch(basic_information, adapt_information, *, root=ROOT):
     basic = read_object(basic_path)
     with locked(root / 'data/source_code/.torchnpu-source.lock'):
         adapt = read_object(adapt_path)
+        if adapt.get('withdrawing-api'):
+            raise ValueError('Resume the incomplete API withdrawal first')
         # A failed replan must not leave an old plan available for execution.
         if 'adapt-plan' in adapt or 'dispatcher' in adapt:
             adapt.pop('adapt-plan', None)

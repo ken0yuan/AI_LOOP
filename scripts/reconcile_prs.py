@@ -210,8 +210,11 @@ def finish_merged(database, mapping_path, record_path, record, remote):
     table = NIGHTLY_TABLE if group == 'nightly' else f'{NIGHTLY_TABLE}_{group}'
     adapt_path = record_path.parent / 'adapt-information.json'
     statuses = record.get('api-status')
+    scope = read_object(adapt_path) if adapt_path.is_file() else {}
+    if scope.get('withdrawing-api') or (statuses is None and scope.get('withdrawn-apis')):
+        raise ValueError('撤项后需要核实本次合入的 PR 收据才能回填')
     if statuses is None and adapt_path.is_file():
-        statuses = read_object(adapt_path).get('api-status')
+        statuses = scope.get('api-status')
     if not isinstance(statuses, dict) or not statuses:
         raise ValueError('已合入PR缺少逐API状态，不能回填或清理')
     if any(status not in STRATEGIES for status in statuses.values()):
@@ -226,6 +229,8 @@ def finish_merged(database, mapping_path, record_path, record, remote):
             if canonical in canonical_status and canonical_status[canonical] != statuses[name]:
                 raise ValueError('同一正名出现相互冲突的状态: ' + canonical)
             canonical_status[canonical] = statuses[name]
+        if set(canonical_status).intersection(scope.get('withdrawn-apis', [])):
+            raise ValueError('发布收据仍涉及本批撤项，须核对实际合入范围后再回填')
         references, evidence, reasons_removed = classification_closeout(
             conn, database, list(rows.values()), group, table)
         for name, status in canonical_status.items():
