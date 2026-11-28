@@ -151,12 +151,15 @@ class RefreshTests(unittest.TestCase):
         for name in ['torch.docgone', 'torch.gone']:
             self.assertEqual({k:v for k,v in after[name].items() if k != '是否支持'},
                              {k:v for k,v in before[name].items() if k != '是否支持'})
-        self.assertEqual(after['torch.not_yet_built']['是否支持'], 'API删除，待下线')
+        self.assertNotIn('torch.not_yet_built', after)
+        self.assertEqual(result['added'], 1)
+        self.assertEqual(result['deferred_new'], 1)
+        self.assertEqual(result['api_deleted'], 3)
         self.assertEqual(after['torch.new_api']['是否对外'], '是')
         self.assertEqual(after['torch.new_api']['分类待审核'], '是')
         self.assertIsNone(after['torch.new_api']['API适配分类'])
         self.assertEqual(json.loads(self.output.read_text()), ['torch.new_api'])
-        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.new_api', 'torch.not_yet_built'])
+        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.new_api'])
         self.assert_clean()
 
     def test_actual_added_names_survive_same_run_retry_and_include_later_insertions(self):
@@ -467,13 +470,41 @@ cufft_plan_cache = Manager()
         self.assertNotIn('torch.Tensor', self.rows())
 
     def test_missing_new_name_is_retried_when_it_appears_in_later_wheel(self):
-        self.run_refresh({'torch.later'})
+        result = self.run_refresh({'torch.later'})
+        self.assertEqual((result['added'], result['deferred_new']), (0, 1))
+        self.assertNotIn('torch.later', self.rows())
+        self.assertEqual(json.loads(self.added_output.read_text()), [])
         self.assertEqual(json.loads(self.output.read_text()), [])
         with (self.torch / '__init__.py').open('a') as stream:
             stream.write('\ndef later(): pass\n')
-        self.run_refresh({'torch.later'})
-        self.assertEqual(json.loads(self.output.read_text()), ['torch.later'])
+        later = self.task.parent / 'next-nightly'
+        later.mkdir()
+        basic = later / 'basic_information.json'
+        basic.write_bytes(self.basic.read_bytes())
+        result = refresh.refresh(basic, self.database, root=self.root,
+                                 extractor=lambda work: {'torch.later'}, checker=self.checker)
+        self.assertEqual((result['added'], result['deferred_new']), (1, 0))
+        self.assertEqual(json.loads((later / 'api-refresh/added-apis.json').read_text()), ['torch.later'])
+        self.assertEqual(json.loads((later / 'api-refresh/new-apis.json').read_text()), ['torch.later'])
+        self.assertEqual(json.loads(self.added_output.read_text()), [])
         self.assertIn('torch.later', self.rows())
+
+    def test_retry_drops_wheel_missing_names_from_this_runs_added_list(self):
+        self.run_refresh({'torch.new_api', 'torch.stay'})
+        with (self.torch / '__init__.py').open('a') as stream:
+            stream.write('\ndel new_api\n')
+        self.run_refresh({'torch.new_api', 'torch.stay'})
+        self.assertEqual(json.loads(self.added_output.read_text()), ['torch.stay'])
+        self.assertEqual(json.loads(self.output.read_text()), ['torch.stay'])
+        self.assertEqual(self.rows()['torch.new_api']['是否支持'], 'API删除，待下线')
+
+    def test_missing_internal_name_is_not_promoted(self):
+        self.insert('torch.internal', public='否')
+        before = self.rows()
+        result = self.run_refresh({'torch.internal'})
+        self.assertEqual(result['promoted'], 0)
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(json.loads(self.added_output.read_text()), [])
 
     def test_repeated_task_preserves_handoff_and_rechecks_all_documented_names(self):
         self.run_refresh({'torch.new_api'})

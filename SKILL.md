@@ -5,6 +5,12 @@ description: 按既定步骤编排 PyTorch API 的 NPU 适配准备、分支管�
 
 # AI_LOOP
 
+## 进入和退出共享工作区
+
+每次开始 AI_LOOP 任务，主控先从本 skill 的目录运行 `python3 -B scripts/workspace_lock.py enter`。确认命令成功后才进入以下步骤。锁忙时在当前步骤外等待或结束本轮，保留待办。把返回的任务票据记入本次任务上下文或运行记录，供结束和异常恢复使用。宿主提供稳定的任务进程 PID 时，可在 enter 命令附加 `--owner-pid <PID>`，使任务进程退出时自动释放锁；一次性工具 shell 的 PID 不适用。
+
+主控在任务结束、取消或已保存待办准备等待外部结果时，先结束使用该工作区的子任务，再运行 `python3 -B scripts/workspace_lock.py leave <票据>`。同一任务内的子代理沿用主控持锁期。后续轮次恢复待办时重新 enter。返回 `inherited` 表示外层定时或回传进程已持锁，leave 会把释放工作留给外层。异常中断且无进程退出监视时，由恢复任务核实原任务已停止，凭原票据 leave。
+
 接收适配需求，准备环境与API数据，安排开发任务，并跟踪issue、PR及合入后的收尾。
 
 定时触发 PR 跟踪时，直接按 [Step 0.1 的定时入口](steps/step0.1-pr_reconciliation.md)执行合入收尾和开放 PR 评审，本轮在该步骤结束。

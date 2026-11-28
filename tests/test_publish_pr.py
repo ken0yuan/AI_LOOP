@@ -129,13 +129,59 @@ class SharedIssuePublication(unittest.TestCase):
 
     def test_api_template_blocks_old_body_before_create_or_edit(self):
         adapt = pub.read(self.run_dir / "adapt-information.json")
-        adapt["adapt-plan"] = {"step1": {"agentname": "api-adaptation"}}
+        adapt.update({"adapt-plan": {"step1": {"agentname": "api-adaptation"}},
+                      "task-branches": ["adapt-torch.ok"], "api-status": {"torch.ok": "支持"}})
+        (self.run_dir / "api-loop").mkdir()
+        pub.save(self.run_dir / "api-loop/result.json",
+                 {"results": [{"api": "torch.ok", "status": "支持", "next_step": "step4", "execution": "pass"}]})
         pub.save(self.run_dir / "adapt-information.json", adapt)
         pub.save(self.run_dir / "basic_information.json", {"venv": "data/venv/torch-2.15/python-3.11"})
         self.assert_refused("PR 草稿格式错误")
         self.prs[20] = pr(20)
         self.remote = SHA
         self.assert_refused("PR 草稿格式错误")
+
+    def test_retained_api_gate_before_create_and_update(self):
+        names = [f"torch.api{i:02}" for i in range(30)]
+        adapt = pub.read(self.run_dir / "adapt-information.json")
+        rows = [dict(api=n, status="支持", next_step="step4", execution="pass",
+                     device_validation={"cuda": {"execution": "not_run"}}) for n in names]
+        for row in rows[24:]:
+            row.update(status="补充testcase", next_step="step1", execution="partial")
+        rows[0]["database_api"] = "torch.canonical"
+        statuses = {row.get("database_api", row["api"]): row["status"] for row in rows}
+        adapt.update({"task-branches": ["adapt-" + n for n in names], "api-status": statuses})
+        (self.run_dir / "api-loop").mkdir()
+        pub.save(self.run_dir / "api-loop/result.json", {"results": rows})
+        pub.save(self.run_dir / "adapt-information.json", adapt)
+        for existing in (False, True):
+            if existing:
+                self.prs[20] = pr(20)
+                self.remote = SHA
+            with self.assertRaises(pub.PublishError) as caught:
+                pub.publish(self.args)
+            self.assertEqual([line.split(":")[0] for line in str(caught.exception).splitlines()[1:]], names[24:])
+            self.assertEqual(self.writes, [])
+            self.assertFalse((self.run_dir / "pr.json").exists())
+        adapt["task-branches"] = adapt["task-branches"][:24]
+        self.assertEqual(pub.delivery_status(self.run_dir, adapt),
+                         {row.get("database_api", row["api"]): "支持" for row in rows[:24]})
+
+    def test_retained_api_requires_consistent_evidence(self):
+        row = {"api": "torch.x", "status": "支持", "next_step": "step4",
+               "strategy": "补充testcase", "execution": "pass"}
+        scope = {"task-branches": ["adapt-torch.x"], "api-status": {"torch.x": "支持"}}
+        path = self.run_dir / "api-loop/result.json"
+        path.parent.mkdir()
+        for results, status in [([], "支持"), ([row, row], "支持"), ([row], None),
+                                ([dict(row, status="待适配")], "支持"), ([dict(row, next_step="step3.1")], "支持"),
+                                ([dict(row, execution="not_run")], "支持"), ([dict(row, execution="partial")], "支持")]:
+            with self.subTest(results=results, status=status):
+                pub.save(path, {"results": results})
+                with self.assertRaisesRegex(pub.PublishError, "torch.x"):
+                    pub.delivery_status(self.run_dir, dict(scope, **{"api-status": {"torch.x": status}}))
+        pub.save(path, {"results": [dict(row, strategy="已支持", execution="not_run")]})
+        self.assertEqual(pub.delivery_status(self.run_dir, scope), {"torch.x": "支持"})
 
     def test_create_then_resume_only_own_pr(self):
         self.sibling(head="batch-a", number=10)

@@ -6,6 +6,10 @@
 
 已有统一回执能独立证明整批覆盖时，可直接传回执和 `--draft`。使用历史 NPU 日志或汇总局部补测时，按 [Step 4.2](../steps/step4.2-create_pr.md) 的完整命令填写。省略 `--draft` 可在终端预览设备行。
 
+## 新一轮 NPU unittest 验证
+
+A3 和 950 复测共用 `api-adaptation/scripts/run_npu_unittest.py`。950 的批次启动脚本随包携带该入口，或使用 `~/.local/share/api-adaptation/scripts/run_npu_unittest.py`。保留原有环境检查、选卡、逐文件子进程及超时，执行命令传入 `--source <源码根目录> --file <仓内相对路径> --attempt <本轮证据目录>`。按文件将 `unittest/<仓内相对路径>/execution-result.json` 和相邻 `junit.xml` 一起回传；汇总多个文件时按当前计划使用 `--reuse`。进程中断时保留实际退出码和日志。历史纯日志回执仍按下表读取。
+
 ## 回执与历史归档
 
 | 来源 | 取哪些记录 |

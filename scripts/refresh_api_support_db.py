@@ -351,7 +351,8 @@ def publish(database, initial_state, additions, changes, output, *, first_versio
         handoff = sorted(handoff)
         outputs = {output: handoff}
         if added_apis is not None:
-            outputs[added_apis] = sorted(added_names)
+            outputs[added_apis] = sorted(name for name in added_names
+                                         if final[name]['是否支持'] not in OFFLINE_STATES)
         for path, names in outputs.items():
             content = (json.dumps(names, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
             temporaries[path] = stage_output(path, content)
@@ -413,16 +414,20 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
         current = {row[columns.index('API名称')]: dict(zip(columns, row)) for row in rows}
         public = {name for name, row in current.items() if row['是否对外'] == '是'}
         additions, removals = candidates(doc_names, state)
-        promotions = {name for name in doc_names if name in current
-                      and current[name]['是否对外'] != '是'}
-        doc_to_row = {name: name if name in current else
-                      (match_api_name(name, public) or name) for name in doc_names}
         required = doc_names | {canonical(name) for name in removals}
         results = (checker(python, scripts / 'scan_documented_apis.py', required, work)
                    if checker else recovery.check(check_in_wheel, required))
         if set(results) != required or any(type(value) is not bool for value in results.values()):
             raise ValueError('Incomplete wheel existence results')
-        inserted = additions
+        # A docs-only name remains a candidate for the next nightly wheel.
+        inserted = {name for name in additions if results[name]}
+        promotions = {name for name in doc_names if results[name] and name in current
+                      and current[name]['是否对外'] != '是'}
+        doc_to_row = {}
+        for name in doc_names:
+            row_name = name if name in current else (match_api_name(name, public) or name)
+            if results[name] or row_name in public:
+                doc_to_row[name] = row_name
         changes = {name: '文档删除，待下线' if results[canonical(name)] else 'API删除，待下线'
                    for name in removals}
         for name, row_name in doc_to_row.items():
@@ -454,7 +459,7 @@ def refresh(basic_information, database=None, new_apis=None, *, root=ROOT,
                           added_apis=added_apis)
         recovery.complete(results)
     return {'status': 'DATABASE_REFRESHED', 'documented': len(doc_names), 'checked': len(required),
-            'added': len(inserted), 'promoted': len(promotions),
+            'added': len(inserted), 'deferred_new': len(additions - inserted), 'promoted': len(promotions),
             'aliases': sum(target is not None for target in aliases.values()),
             'api_deleted': sum(value == 'API删除，待下线' for value in changes.values()),
             'documentation_deleted': sum(value == '文档删除，待下线' for value in changes.values()),

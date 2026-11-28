@@ -116,7 +116,14 @@ def find_pr(target, issue, known):
         require(issue.lower() in linked_in_text or (number in linked and not linked_in_text),
                 "Matching branch has a PR linked to a different or missing issue.")
         matches.append(item)
-    require(len(matches) <= 1, "Multiple PRs matched this source and target. Resolve the ambiguity first.")
+    if len(matches) > 1:
+        # The platform can answer one create with two records for the same fork
+        # branch. Keep the recorded or single open record; anything else still
+        # needs manual reconciliation.
+        preferred = [item for item in matches
+                     if item["number"] == known or item["state"] in ("open", "opened")]
+        require(len(preferred) == 1, "Multiple PRs matched this source and target. Resolve the ambiguity first.")
+        matches = preferred
     if not matches:
         return None
     require(matches[0]["state"] in ("open", "opened") and not matches[0].get("merged"), "Existing PR is closed or merged.")
@@ -193,14 +200,49 @@ def push_reviewed(repo, url, branch, code, pr, expected):
         *options, "origin", f"{code}:{ref}")
 
 
-def owned_status(adapt):
+def delivery_status(run, adapt):
     statuses = adapt.get("api-status", {})
     require(isinstance(statuses, dict), "Invalid api-status in adapt-information.json.")
     tasks = adapt.get("task-branches")
-    if tasks is None:
+    result_path = run / "api-loop/result.json"
+    api_plan = any(item.get("agentname") == "api-adaptation"
+                   for item in (adapt.get("adapt-plan") or {}).values() if isinstance(item, dict))
+    if tasks is None and not api_plan and not result_path.is_file():
         return statuses
-    return {key: value for key, value in statuses.items()
-            if key in tasks or "adapt-" + key in tasks}
+    require(isinstance(tasks, list), "发布清单缺少 task-branches。")
+    apis = [task.removeprefix("adapt-") for task in tasks if task.startswith("adapt-")]
+    require(apis or not api_plan, "发布清单没有保留的 API。")
+    retained = {task: statuses[task] for task in tasks if task in statuses and not task.startswith("adapt-")}
+    if not apis:
+        return retained
+
+    require(result_path.is_file(), "缺少本批 API 逐项结果 api-loop/result.json。")
+    rows = read(result_path).get("results")
+    require(isinstance(rows, list), "api-loop/result.json 缺少 results 数组。")
+    by_api = {}
+    for row in rows:
+        require(isinstance(row, dict), "无效的 API 结果记录。")
+        by_api.setdefault(row.get("api"), []).append(row)
+
+    errors = []
+    for api in apis:
+        matches = by_api.get(api, [])
+        if len(matches) != 1:
+            errors.append(f"{api}: 对应 {len(matches)} 条结果，应有 1 条")
+            continue
+        row = matches[0]
+        name = row.get("database_api") or api
+        status = statuses.get(name)
+        step, outcome, execution = row.get("next_step"), row.get("status"), row.get("execution")
+        needs_test = row.get("strategy") in ("待适配", "补充testcase") or row.get("test_files") or row.get("adaptation")
+        if (status != "支持" or outcome != "支持" or step != "step4"
+                or (needs_test and execution != "pass")
+                or execution in ("partial", "fail", "skip", "blocked")):
+            errors.append(f"{api}: api-status={status}, status={outcome}, next_step={step}, execution={execution}")
+        else:
+            retained[name] = status
+    require(not errors, "以下 API 未满足发布条件：\n" + "\n".join(errors))
+    return retained
 
 
 def check_gpu_evidence(run, repo, code, verification, changed_paths, body):
@@ -362,8 +404,9 @@ def publish(args):
     with issue_lock(run, issue_url.lower()), TemporaryDirectory() as staging:
         require(adapt == read(run / "adapt-information.json") and not adapt.get("withdrawing-api"),
                 "Task scope changed; finish withdrawal and review the current handoff.")
+        retained = delivery_status(run, adapt)
         if adapt.get("withdrawn-apis"):
-            require(owned_status(adapt), "No retained API status to publish after withdrawal.")
+            require(retained, "No retained API status to publish after withdrawal.")
         for filename in ("publish-state.json", "pr.json"):
             for other in run.parent.glob(f"*/{filename}"):
                 if other.parent == run:
@@ -459,7 +502,7 @@ def publish(args):
         receipt = dict(record, **key)
         receipt.update({"status": "created", "number": int(pr["number"]), "url": url, "commit": code,
                         "remote-sha": code, "run-id": run.name, "verification": str(args.verification),
-                        "api-status": owned_status(adapt)})
+                        "api-status": retained})
         register_receipt(run, receipt)
         return url
 
